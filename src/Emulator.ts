@@ -97,6 +97,10 @@ implements IGetGenesisInfos, IGetProtocolParameters, IResolveUTxOs, ISubmitTx
         }
     }
 
+
+    // tbd - awaitSlot
+
+
     // awaitBlock:
     // go through the mempool
     //    - For each transaction:
@@ -106,8 +110,20 @@ implements IGetGenesisInfos, IGetProtocolParameters, IResolveUTxOs, ISubmitTx
     //       - If no:
     //          - remove the transaction from the mempool
     // Moves time forward to the next blockNumber block
-    awaitBlock (blockNum : number) : void {
-        if (blockNum > 0){
+
+    // height in blockchain is the block number. so if awaitBlock(1) represents to wait for one block to go through 
+
+    awaitBlock (height : number) : void {
+        if (height > 0){
+
+            // const slotsToAdvance = blockNum - this.slot; // Calculate slots to advance
+            // if (slotsToAdvance <= 0) {
+            //     console.warn("Invalid block number. Must be greater than the current slot.");
+            //     return;
+            // }
+            this.slot += height * 20;
+            this.time += height * 20 * 1000;
+
             while (!this.mempool.isEmpty()){
                 const tx = this.mempool.dequeue()!;
                 for (let i = 0; i < tx.body.inputs.length; i++){
@@ -118,14 +134,24 @@ implements IGetGenesisInfos, IGetProtocolParameters, IResolveUTxOs, ISubmitTx
                     this.pushUtxo(new UTxO({
                         resolved: tx.body.outputs[i],
                         utxoRef: new TxOutRef({
-                            id: new Hash32('a'.repeat(64)),
+                            id: tx.hash.toString(), // to be fixed
                             index: i
                         })
                     }))
                 }
+                
             }
+            // to do - update this.slot and this.time
+            // to do - Move time forward to the next block number
+            // to do - Update the block number
+
+            // Update slot and time
+            
+            console.log(`Advanced to block number ${height} (slot ${this.slot}). Time: ${new Date(this.time).toISOString()}`);
+
+        } else {
+            console.warn("Invalid block number. Must be greater than zero.");
         }
-        else {}
     }
    
     private removeUtxo( utxoRef: CanBeTxOutRef ): void
