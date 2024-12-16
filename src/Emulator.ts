@@ -43,6 +43,7 @@ implements IGetGenesisInfos, IGetProtocolParameters, IResolveUTxOs, ISubmitTx
 
     private time: number;
     private slot: number;
+    private blockHeight: number;
 
     private readonly genesisInfos: NormalizedGenesisInfos;
     private readonly protocolParameters: ProtocolParameters;
@@ -68,6 +69,7 @@ implements IGetGenesisInfos, IGetProtocolParameters, IResolveUTxOs, ISubmitTx
 
         this.time = this.genesisInfos.systemStartPosixMs;
         this.slot = this.genesisInfos.startSlotNo;
+        this.blockHeight = 0;
         
         this.utxos = new Map();
         this.stakeAddresses = new Map();
@@ -97,6 +99,10 @@ implements IGetGenesisInfos, IGetProtocolParameters, IResolveUTxOs, ISubmitTx
         }
     }
 
+
+    // tbd - awaitSlot
+
+
     // awaitBlock:
     // go through the mempool
     //    - For each transaction:
@@ -106,26 +112,57 @@ implements IGetGenesisInfos, IGetProtocolParameters, IResolveUTxOs, ISubmitTx
     //       - If no:
     //          - remove the transaction from the mempool
     // Moves time forward to the next blockNumber block
-    awaitBlock (blockNum : number) : void {
-        if (blockNum > 0){
-            while (!this.mempool.isEmpty()){
-                const tx = this.mempool.dequeue()!;
-                for (let i = 0; i < tx.body.inputs.length; i++){
-                    this.removeUtxo(tx.body.inputs[i])
-                }
-                // utxoRef { id : TxId?, index : index in the TxOut}
-                for (let i = 0; i < tx.body.outputs.length; i++){
-                    this.pushUtxo(new UTxO({
-                        resolved: tx.body.outputs[i],
-                        utxoRef: new TxOutRef({
-                            id: new Hash32('a'.repeat(64)),
-                            index: i
-                        })
-                    }))
+
+    awaitBlock (height : number = 1) : void {
+        if (height <= 0) {
+            console.warn("Invalid call to awaitBlock. Argument height must be greater than zero.");
+        }
+        
+        while (height > 0) {
+
+            this.blockHeight += 1;
+            console.log(`Block ${this.blockHeight}`);
+            
+            this.slot += height * (this.genesisInfos.slotLengthMs / 1000);
+            this.time += height * this.genesisInfos.slotLengthMs;
+
+            let currentBlockUsed = 0
+
+            while (!this.mempool.isEmpty()) {
+                let txSize = this.getTxSize(this.mempool.peek())
+                
+                // check if tx size can fit in the block
+                if (txSize && ((currentBlockUsed + txSize) <= this.protocolParameters.maxBlockBodySize)) {
+                    
+                    const tx = this.mempool.dequeue()!;
+                    const txHash = tx.hash.toString();
+                    
+                    for (let i = 0; i < tx.body.inputs.length; i++){
+                        this.removeUtxo(tx.body.inputs[i])
+                    }
+                    for (let i = 0; i < tx.body.outputs.length; i++){
+                        this.pushUtxo(new UTxO({
+                            resolved: tx.body.outputs[i],
+                            utxoRef: new TxOutRef({
+                                id: txHash,
+                                index: i
+                            })
+                        }))
+                    }
+
+                    currentBlockUsed += txSize;
+
+                    txSize = this.getTxSize(this.mempool.peek())
+
+                } else {
+                    break;
                 }
             }
+
+            console.log(`Advanced to block number ${this.blockHeight} (slot ${this.slot}). Time: ${new Date(this.time).toISOString()}`);
+        
+            height -= 1;
         }
-        else {}
     }
    
     private removeUtxo( utxoRef: CanBeTxOutRef ): void
@@ -257,5 +294,13 @@ implements IGetGenesisInfos, IGetProtocolParameters, IResolveUTxOs, ISubmitTx
     private isTxValid(tx: Tx) : boolean {
         // Check if the transaction is valid
         return true
+    }
+
+    getTxSize(tx: Tx | undefined) {
+        return tx ? ((tx instanceof Tx ? tx.toCbor() : tx).toBuffer().length) : 0;
+    }
+
+    getTxMaxSize() {
+        return Number(this.protocolParameters.maxTxSize);
     }
 }

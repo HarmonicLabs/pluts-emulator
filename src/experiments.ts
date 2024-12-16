@@ -1,26 +1,12 @@
 import { Emulator } from "./Emulator"
-import { Credential, defaultProtocolParameters, Tx, IUTxO, UTxO, Value, IValueAdaEntry, Address, AddressStr } from "@harmoniclabs/cardano-ledger-ts"
+import { defaultProtocolParameters, Tx, IUTxO, UTxO, Value, IValueAdaEntry, Address, AddressStr } from "@harmoniclabs/cardano-ledger-ts"
 import { defaultMainnetGenesisInfos, TxBuilder } from "@harmoniclabs/plu-ts-offchain"
 import { getRandomValues } from "crypto"
-
-
-
-console.log("Romain's experiments")
+import { generateRandomBech32Address } from "./utils/helper"
 
 const utxosInit: IUTxO[] = createRandomInitialUtxos(2)
 
 const emulator: Emulator = new Emulator(utxosInit, defaultMainnetGenesisInfos, defaultProtocolParameters);
-
-// print the parameters
-// console.log("Genesis Infos:")
-// console.log(emulator.getGenesisInfos())
-// console.log("-".repeat(20))
-// console.log("Protocol Parameters:")
-// console.log(emulator.getProtocolParameters())
-// console.log("-".repeat(20))
-
-// emulator.printUtxos(emulator.getUtxos())
-// console.log("-".repeat(20))
 
 const txBuilder = new TxBuilder (defaultProtocolParameters, defaultMainnetGenesisInfos)
 
@@ -42,7 +28,7 @@ let tx = txBuilder.buildSync({
 const submittedTx = emulator.submitTx(tx)
 
 console.log(submittedTx)
-
+console.log("UTxO Ref ID:", utxo.utxoRef.id.toString());
 emulator.printMempool()
 
 emulator.awaitBlock(1)
@@ -52,36 +38,73 @@ emulator.printMempool()
 console.log("End of mempool to check")
 emulator.printUtxos(emulator.getUtxos())
 
-// Bunch of useful functions, should we have them in the Emulator class?
-function createRandomInitialUtxos(numUtxos: number): IUTxO[] {
-    const utxos: IUTxO[] = []
+
+/**
+ * Create a list of random UTxOs with dynamically calculated ADA values based on transaction size
+ * @param numUtxos number of random utxos to create
+ * @param targetAmount lovelaces which has to be populated in the address
+ * @param debugLevel to further check if the tx is a valid tx falling within the limits
+ * @returns utxos list
+ */
+function createRandomInitialUtxos(
+    numUtxos: number, 
+    targetAmount: bigint = 100000000n,
+    debugLevel: number = 1
+): IUTxO[] {
+
+    const utxos: IUTxO[] = [];
+
     for (let i = 0; i < numUtxos; i++) {
-        // (typeof id === "string" && bytestring_1.ByteString.isValidHexValue(id) && (id.length === 64))
-        const utxoHash = "a".repeat(63) + i.toString()
-        // console.log(utxoHash)
-        const address = generateRandomBech32Address() // Have a way to generate random Bech32 addresses
-        const utxoInit: IUTxO = createInitialUTxO(100000000n, address, utxoHash);
-        utxos.push(utxoInit)
+        const utxoHash = generateRandomTxHash(i); // Unique hash per UTxO
+        const address = generateRandomBech32Address();
+
+        const utxoInit: IUTxO = createInitialUTxO(targetAmount, address, utxoHash);
+
+        const txSize = BigInt(new UTxO(utxoInit).toCbor().toBuffer().length);
+
+        // const maxTxSizeBytes = emulator.getTxMaxSize();
+        // if (txSize <= BigInt(maxTxSizeBytes)) {
+            utxos.push(utxoInit);
+        //     if (debugLevel > 1) {
+        //         console.log(`UTxO ${utxoHash} added with size ${txSize} bytes.`);
+        //     }
+        // } else {
+        //     if (debugLevel > 0) {
+        //         console.warn(`UTxO ${utxoHash} skipped due to size (${txSize} bytes) exceeding the limit (${maxTxSizeBytes} bytes).`);
+        //     }
+        // }
     }
-    return utxos
+
+    // if (debugLevel > 0) {
+    //     console.log(`${utxos.length}/${numUtxos} UTxOs successfully created within size limits.`);
+    // }
+
+    return utxos;
 }
 
-function createInitialUTxO(numAda: bigint, addressW: Address | AddressStr, id: string): IUTxO {
-    const adaEntry: IValueAdaEntry = Value.lovelaceEntry(numAda)
-
-    const utxoInit: IUTxO = new UTxO({
+function createInitialUTxO(numAda: bigint, address: Address | AddressStr, id: string): IUTxO {
+    const adaEntry: IValueAdaEntry = Value.lovelaceEntry(numAda);
+    return new UTxO({
         utxoRef: { id: id, index: 0 },
-        resolved: { address: addressW, value: new Value([adaEntry]), datum: undefined, refScript: undefined }
-    })
-    return utxoInit
+        resolved: {
+            address: address,
+            value: new Value([adaEntry]),
+            datum: undefined,
+            refScript: undefined,
+        },
+    });
 }
 
- // Have a way to generate random Bech32 addresses
- function generateRandomBech32Address(): AddressStr {
-    const hash28i = getRandomValues(new Uint8Array(28))
-    const testnetAddr = new Address(
-        "testnet",
-        Credential.keyHash(hash28i)
-    )
-    return testnetAddr.toString()
+
+
+/**
+ * Generate a unique random transaction hash.
+ * 
+ * @param index Index to ensure uniqueness.
+ * @returns A random Tx hash.
+ */
+function generateRandomTxHash(index: number): string {
+    const randomHash = getRandomValues(new Uint8Array(32));
+    randomHash[0] = index; // Ensure uniqueness by incorporating the index
+    return Buffer.from(randomHash).toString("hex");
 }
