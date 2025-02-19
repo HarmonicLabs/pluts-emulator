@@ -77,7 +77,7 @@
     "@harmoniclabs/cardano-costmodels-ts": "^1.1.0",
     "@harmoniclabs/plutus-machine": "^2.0.0-dev2",
     "@harmoniclabs/cardano-ledger-ts": "^0.2.0-dev5",
-    "@harmoniclabs/plu-ts-offchain": "0.1.13-dev4"
+    "@harmoniclabs/plu-ts-offchain": "0.1.13-dev10"
   },
   "devDependencies": {
     "@babel/preset-env": "^7.18.6",
