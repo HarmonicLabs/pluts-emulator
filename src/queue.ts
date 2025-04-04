@@ -1,27 +1,27 @@
 export class Queue<T> {
     private items: T[] = [];
-
+    
     enqueue(item: T): void {
-        this.items.push(item);
+      this.items.push(item);
     }
-
+    
     dequeue(): T | undefined {
-        return this.items.shift();
+      return this.items.shift();
     }
-
+    
     peek(): T | undefined {
-        return this.items[0];
+      return this.items[0];
     }
-
-    isEmpty(): boolean {
-        return this.items.length === 0;
+    
+    get length(): number {
+      return this.items.length;
     }
-
-    size(): number {
-        return this.items.length;
+    
+    [Symbol.iterator]() {
+      return this.items[Symbol.iterator]();
     }
-
-    asArray(): T[] {
-        return this.items;
+    
+    clear(): void {
+      this.items = [];
     }
-}
+  }
