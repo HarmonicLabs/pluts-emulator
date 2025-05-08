@@ -378,9 +378,9 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
     }
 
     /** Returns the set of UTxOs */
-    getUtxos(): Map<TxOutRefStr, UTxO>
+    getUtxos(): UTxO[]
     {
-        return new Map( this.utxos );
+        return Array.from( this.utxos.values() );
     }
 
     /**
@@ -739,8 +739,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
         }
 
         // Add the outputs to the ledger
-        for (let index = 0; index < tx.body.outputs.length; index++) {
-            const output = tx.body.outputs[index];
+        tx.body.outputs.forEach((output, index) => {
 
             // Create a UTxO from the output
             const utxo = new UTxO({
@@ -752,7 +751,10 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             });
             this.debug(2, `Adding output ${utxo.utxoRef.toString()} to ledger`);
             this.addUtxoToLedger(utxo);
-        }
+        });
+
+        // Log the updated UTxO set
+        this.debug(1, `Updated UTxO Set: ${this.utxos}`);
 
         // Process withdrawals
         // Note: We're not really putting rewards in the accounts so far so need to fix that. TODO
@@ -794,6 +796,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
         const isValidTx = await this.validateTx(tx);
         const phase2ValidTx = await this.txBuilder.validatePhaseTwo(tx);
         
+        console.log("phase2 validation result: ", await this.txBuilder.validatePhaseTwoVerbose(tx));
         if (isValidTx && phase2ValidTx) {
             // Add the transaction to the mempool
             this.mempool.enqueue(tx);
@@ -891,23 +894,9 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             return false;
         }
 
-        
-        // 8. phase2 validation
-        if (this.txBuilder.validatePhaseTwo(tx)) {
-            this.debug(2, `Transaction ${txHash} passed phase-2 script validation`);
-        } else {
-            this.debug(0, `Transaction ${txHash} failed phase-2 script validation`);
-            return false;
-        }
-
         this.debug(2, `Transaction ${txHash} is valid in the current slot ${this.slot} at time: (${this.fromSlotToPosix(this.slot)}), validity start: ${lowerBound}, end: ${upperBound}`);
         return true;
-
-        
-        
     }
-
-
 }
 
 
@@ -938,3 +927,31 @@ export function initializeEmulator(addresses: Map<Address, bigint> = new Map()):
     return instance;
   }
 
+
+  /**
+ * Initialize an emulator when handling a single wallet address.
+ * If the address already has a UTxO with 15 ADA, reuse it; otherwise, throw error expecting wallet to be populated manually.
+ * @param utxos The UTxOs contained in the browser wallet to initialize the emulator with.
+ * @returns Configured Emulator instances
+ */
+  export function initializeEmulatorWithWalletUtxOs(utxos: UTxO[]): Emulator {
+    const initialUtxos: IUTxO[] = [];
+  
+    // Check if wallet already has a UTxO with 15 ADA
+    if (!utxos.length) 
+      throw new Error("Wallet doesn't have enough funds. Have you requested funds from the faucet?");
+    const utxo = utxos.find(u => u.resolved.value.lovelaces >= 15_000_000);
+    if (utxo === undefined)
+      throw new Error("Not enough ADA");
+  
+  
+    initialUtxos.push(utxo);
+  
+    return new Emulator(
+      initialUtxos,
+      defaultMainnetGenesisInfos, 
+      defaultProtocolParameters,
+      0 // Debug level
+    );
+  }
+  
