@@ -801,9 +801,10 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             // Add the transaction to the mempool
             this.mempool.enqueue(tx);
             this.debug(1, `Transaction ${tx.hash.toString()} is valid: Adding to mempool, length: ${this.mempool.length}.`);
-        }
-
-        return Promise.resolve(tx.hash.toString());        
+            return Promise.resolve(tx.hash.toString());
+        } else {
+            return Promise.reject(tx.hash.toString())
+        }    
     }
 
     /**

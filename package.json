@@ -1,6 +1,6 @@
 {
   "name": "@harmoniclabs/pluts-emulator",
-  "version": "0.0.1-dev7",
+  "version": "0.0.1-dev8",
   "description": "Cardano emulator for offchian testing",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
