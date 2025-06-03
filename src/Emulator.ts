@@ -14,7 +14,8 @@ import {
     ITxRunnerProvider,
     TxOutRefStr,
     UTxO,
-    Hash32
+    Hash32,
+    CredentialType
 } from "@harmoniclabs/plu-ts"
 
 import {
@@ -727,6 +728,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             // TODO: Add collateral slashing
             // this.debug(0, `Slashing collateral for transaction ${txHash}`);
             // this.slashCollateral(tx);
+            // 
             return;
         }
 
@@ -810,7 +812,6 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
     /**
      * Validate a transaction against the current state
      * @param tx Transaction to validate
-     * TOBEREPLACED: By the TxBuilder validation
      */
     private async validateTx(tx: Tx): Promise<boolean> {
         const txHash = tx.hash.toString();
@@ -895,8 +896,55 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             return false;
         }
 
-        this.debug(2, `Transaction ${txHash} is valid in the current slot ${this.slot} at time: (${this.fromSlotToPosix(this.slot)}), validity start: ${lowerBound}, end: ${upperBound}`);
+        // 5. Collateral presence check for phase 1
+        if (!this.validateCollateral(tx)) {
+            this.debug(0, `Insufficient collateral. Atleast 5 ADA collateral is required for script inputs.`);
+            return false;
+        }
+
+        this.debug(2, `Transaction ${txHash} is valid`);
         return true;
+
+    }
+
+    /**
+     * Validate tx inputs to ensure sufficient collateral is provided in it
+     * @param tx Transaction to validate collateral for
+     * @returns 
+     */
+    private validateCollateral(tx: Tx): boolean {
+        const minCollateral = BigInt(5000000); // Minimum collateral of 5 Ada
+        const hasScriptInput = tx.body.inputs.some(input => {
+            const utxo = this.utxos.get(input.utxoRef.toString());
+            if (!utxo || !utxo.resolved.address || !utxo.resolved.address.paymentCreds) {
+                throw new Error(`Invalid input: ${input.utxoRef.toString()}`);
+            }
+            return utxo && utxo.resolved.address.paymentCreds.type === CredentialType.Script; // Check if input is a script
+        });
+    
+        if (hasScriptInput) {
+            const collateralInputs = tx.body.collateralInputs || [];
+            collateralInputs.forEach(input => {
+                const utxo = this.utxos.get(input.utxoRef.toString());
+                if (!utxo || !utxo.resolved.address) {
+                    throw new Error(`Invalid collateral input: ${input.utxoRef.toString()}`);
+                }
+                if (!utxo.resolved.address.paymentCreds) {
+                    throw new Error(`Invalid collateral address: ${JSON.stringify(utxo.resolved.address)}`);
+                }
+            });
+            const collateralSum = collateralInputs.reduce((sum, input) => {
+                const utxo = this.utxos.get(input.utxoRef.toString());
+                return utxo ? sum + utxo.resolved.value.lovelaces : sum;
+            }, BigInt(0));
+    
+            if (collateralSum < minCollateral) {
+                this.debug(0, `Insufficient collateral: ${collateralSum} lovelaces provided, but ${minCollateral} required.`);
+                return false;
+            }
+        }
+    
+        return true; // No collateral required if no script inputs are present
     }
 }
 
@@ -912,6 +960,10 @@ export function initializeEmulator(addresses: Map<Address, bigint> = new Map()):
     
     // Create UTxOs for each address with specified amount
     for (const [address, lovelaces] of addresses.entries()) {
+        if (!address || typeof address.toString !== "function") {
+            throw new Error(`Invalid address: ${address}`);
+        }
+
       const txHash = generateRandomTxHash(index);
       const utxo = createInitialUTxO(lovelaces, address, txHash);
       initialUtxos.push(utxo);
