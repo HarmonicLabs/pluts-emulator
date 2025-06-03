@@ -831,29 +831,16 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
                 return false;
             }
         }
-        // 2. Check that the transaction is well-balanced, i.e. everything in inputs is in outputs 
-        // Note: Only lovelaces are checked here. Assets are not checked yet.
-        const inputLovelaces = tx.body.inputs.reduce((acc, input) => {
-            const utxo = this.utxos.get(forceTxOutRefStr(input));
-            return acc + (utxo ? utxo.resolved.value.lovelaces : 0n);
-        }, 0n);
-        const outputLovelaces = tx.body.outputs.reduce((acc, output) => {
-            return acc + output.value.lovelaces;
-        }, 0n);
+        
 
-        // Don't forget to add the fee to the output
-        if (inputLovelaces !== outputLovelaces + (tx.body.fee || 0n)) {
-            this.debug(0,`Transaction ${txHash} is not well-balanced: inputs ${inputLovelaces}, outputs ${outputLovelaces}, fee ${tx.body.fee || 0n}`);
-            return false;
-        }
-
-        // 3. Check that the transaction has at least one input
+        // 2. Check that the transaction has at least one input
         // Note: A Tx can have no output: e.g. https://cexplorer.io/tx/d2a2098fabb73ace002e2cf7bf7131a56723cd0745b1ef1a4f9e29fd27c0eb68
         if (tx.body.inputs.length === 0) {
              this.debug(0, "Transaction must have at least one input or mint tokens");
+             return false;
         }
 
-        // 4. Check for duplicate inputs
+        // 3. Check for duplicate inputs
         const inputSet = new Set<string>();
         for (const input of tx.body.inputs) {
             const inputStr = forceTxOutRefStr(input);
@@ -865,37 +852,15 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             inputSet.add(inputStr);
         }
         
-        // 5. Check transaction size against limit
+        // 4. Check transaction size against limit
         const txSize = this.getTxSize(tx);
         const maxTxSize = this.protocolParameters.maxTxSize;
         if (txSize > maxTxSize) {
             this.debug(0,`Transaction size (${txSize} bytes) exceeds maximum allowed size (${maxTxSize} bytes)`);
             return false;
         }
-        
-        // 6. Check that the fee is sufficient
-        const calculatedFee = this.calculateMinFee(tx);
-        const providedFee = tx.body.fee || 0n;
-        
-        if (providedFee < calculatedFee) {
-            this.debug(0,`Insufficient fee: provided ${providedFee}, required at least ${calculatedFee}`);
-        }
 
-        // 7. Validity range
-        // Note: Simple implementation with no regard for the stability window.
-        const lowerBound = tx.body.validityIntervalStart;
-        const upperBound = tx.body.ttl;
-
-        if (lowerBound !== undefined && (this.slot) < lowerBound) {
-            this.debug(0, `Transaction ${txHash} is not valid yet. Current slot: ${this.slot}, lower bound: ${lowerBound}`);
-            return false;
-        }
-        if (upperBound !== undefined && (this.slot) > upperBound) {
-            this.debug(0, `Transaction ${txHash} has expired. Current slot: ${this.slot}, upper bound: ${upperBound}`);
-            return false;
-        }
-
-        this.debug(2, `Transaction ${txHash} is valid in the current slot ${this.slot} at time: (${this.fromSlotToPosix(this.slot)}), validity start: ${lowerBound}, end: ${upperBound}`);
+        this.debug(2, `Transaction ${txHash} is valid`);
         return true;
     }
 }
