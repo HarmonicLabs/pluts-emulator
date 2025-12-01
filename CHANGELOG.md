@@ -9,15 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added (2025-12-01)
 
-- **Value Preservation Validation**: Implemented fundamental blockchain rule enforcement
+- **Value Preservation Validation**: Implemented fundamental blockchain rule enforcement for ALL assets
   - Created modular validation system in `src/validation/` directory
   - `ValidationResult` interface for consistent error handling across validation rules
-  - `validateValuePreservation()` function checks the equation: `inputs + minted = outputs + fee + burned`
-  - Detailed error messages showing exactly how much value is being created/destroyed
-  - Prevents both ADA creation and destruction attacks
-  - Added comprehensive test suite in `tests/value-preservation.test.ts` (4 tests)
-    - Manual transaction construction tests for edge cases (creating/destroying ADA)
-    - TxBuilder test demonstrating automatic balancing and value preservation
+  - `validateValuePreservation()` function checks the equation for ALL assets: `inputs + minted = outputs + fee`
+    - For ADA (lovelaces): `inputs = outputs + fee` (cannot mint/burn ADA)
+    - For native tokens: `inputs + minted = outputs` (can mint/burn tokens)
+  - Tracks all assets using a Map structure (policyId + assetName)
+  - Validates value preservation independently for each asset
+  - Detailed error messages showing exactly which asset and how much is being created/destroyed
+  - Prevents both ADA and native token value preservation violations
+  - Added comprehensive test suite in `tests/value-preservation.test.ts` (8 tests total)
+    - **ADA tests** (4 tests):
+      - Manual transaction construction tests for edge cases (creating/destroying ADA)
+      - TxBuilder test demonstrating automatic balancing and value preservation
+    - **Native Token tests** (4 tests):
+      - Test rejection of creating tokens without minting declaration
+      - Test rejection of destroying tokens without burning declaration
+      - Test acceptance of proper token minting with mint field
+      - Test acceptance of proper token burning with negative mint field
+    - **Test Structure**: All tests use try-catch blocks for informative error reporting
+      - Rejection tests identify security vulnerabilities when malicious transactions are accepted
+      - Acceptance tests identify emulator bugs when valid transactions are rejected
 - **Validation Architecture**: Structured validation system for future rules
   - `src/validation/types.ts`: Common validation types and helpers
   - `src/validation/valuePreservation.ts`: Value preservation implementation
@@ -87,7 +100,8 @@ This is the version before the recent test suite fixes. See git history for deta
 ### Test Coverage Progress
 - **Before fixes**: 2/10 tests passing (20%)
 - **After test suite fixes**: 37/37 tests passing (100%)
-- **After value preservation**: 41/41 tests passing (100%)
+- **After value preservation (ADA only)**: 41/41 tests passing (100%)
+- **After native token tests**: 45/45 tests passing (100%)
 - **Test Suites**: 5/5 passing
 
 ### Code Changes

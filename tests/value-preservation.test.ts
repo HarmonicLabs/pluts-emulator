@@ -230,12 +230,21 @@ describe("Value Preservation Vulnerability Tests", () => {
         console.log(`Valid transaction hash: ${validTx.hash.toString()}`);
         console.log(`Submitting valid transaction...\n`);
 
-        const txHash = await emulator.submitTx(validTx);
+        try {
+            const txHash = await emulator.submitTx(validTx);
 
-        console.log(`✅ Valid transaction accepted (as expected)`);
-        console.log(`Transaction hash: ${txHash}\n`);
+            console.log(`✅ Valid transaction accepted (as expected)`);
+            console.log(`Transaction hash: ${txHash}\n`);
 
-        expect(txHash).toBe(validTx.hash.toString());
+            expect(txHash).toBe(validTx.hash.toString());
+        } catch (error) {
+            // If we get here, there's a BUG in the emulator (not a vulnerability)
+            console.log(`❌ BUG: Valid transaction was REJECTED`);
+            console.log(`Error: ${error}`);
+            console.log(`\nThe emulator incorrectly rejected a valid transaction that preserves value correctly.\n`);
+
+            fail(`Expected valid transaction to be accepted, but it was rejected: ${error}`);
+        }
     });
 
     it("should demonstrate TxBuilder automatically balances transactions", async () => {
@@ -295,14 +304,347 @@ describe("Value Preservation Vulnerability Tests", () => {
         console.log(`  Verification: ${totalInputValue} = ${totalOutputValue + tx.body.fee} ✓\n`);
 
         // Submit the transaction - should succeed
-        const txHash = await emulator.submitTx(tx);
+        try {
+            const txHash = await emulator.submitTx(tx);
 
-        console.log(`✅ TxBuilder transaction accepted`);
-        console.log(`Transaction hash: ${txHash}\n`);
+            console.log(`✅ TxBuilder transaction accepted`);
+            console.log(`Transaction hash: ${txHash}\n`);
 
-        expect(txHash).toBe(tx.hash.toString());
+            expect(txHash).toBe(tx.hash.toString());
 
-        // Verify value preservation manually
-        expect(totalInputValue).toBe(totalOutputValue + tx.body.fee);
+            // Verify value preservation manually
+            expect(totalInputValue).toBe(totalOutputValue + tx.body.fee);
+        } catch (error) {
+            // If we get here, there's a BUG in the emulator
+            console.log(`❌ BUG: TxBuilder-generated transaction was REJECTED`);
+            console.log(`Error: ${error}`);
+            console.log(`\nThe emulator incorrectly rejected a transaction built by TxBuilder.\n`);
+
+            fail(`Expected TxBuilder transaction to be accepted, but it was rejected: ${error}`);
+        }
+    });
+
+    // ==================== NATIVE TOKEN TESTS ====================
+
+    it("should REJECT transaction that creates native tokens without minting", async () => {
+        const utxo = emulator.getUtxos().values().next().value!;
+        const inputValue = utxo.resolved.value.lovelaces;
+
+        console.log(`\n=== Native Token Creation Without Minting Test ===`);
+        console.log(`Input UTxO value: ${inputValue} lovelaces (${Number(inputValue) / 1_000_000} ADA)`);
+
+        // Create a fake policy ID and token name
+        const fakePolicyId = "a".repeat(56); // 28 bytes = 56 hex chars
+        const fakeTokenName = Uint8Array.from(Buffer.from("MyToken"));
+        const stolenTokens = 1000n;
+
+        console.log(`Attempting to create ${stolenTokens} tokens without minting`);
+        console.log(`Policy: ${fakePolicyId}`);
+        console.log(`Token: ${fakeTokenName.toString()}\n`);
+
+        const fee = 1_000_000n;
+
+        // Create output with ADA + native tokens (but no input tokens!)
+        // Start with ADA value
+        const adaValue = Value.lovelaces(inputValue - fee);
+        // Add native tokens to it
+        const outputValue = Value.add(
+            adaValue,
+            Value.singleAsset(new Hash28(fakePolicyId), fakeTokenName, stolenTokens)
+        );
+
+        const output = new TxOut({
+            address: utxo.resolved.address,
+            value: outputValue
+        });
+
+        const txInput = new TxIn(utxo);
+
+        const txBody = new TxBody({
+            inputs: [txInput],
+            outputs: [output],
+            fee: fee
+            // NOTE: No mint field - we're trying to create tokens from nothing!
+        });
+
+        const maliciousTx = new Tx({
+            body: txBody,
+            witnesses: {
+                vkeyWitnesses: [],
+                nativeScripts: undefined,
+                plutusV1Scripts: undefined,
+                plutusV2Scripts: undefined,
+                plutusV3Scripts: undefined,
+                datums: undefined,
+                redeemers: undefined,
+                bootstrapWitnesses: undefined
+            }
+        });
+
+        console.log(`Malicious transaction hash: ${maliciousTx.hash.toString()}`);
+        console.log(`Attempting to submit transaction that creates tokens without minting...\n`);
+
+        try {
+            const txHash = await emulator.submitTx(maliciousTx);
+            console.log(`❌ VULNERABILITY: Transaction was ACCEPTED!`);
+            fail(`Expected transaction to be rejected, but it was accepted with hash: ${txHash}`);
+        } catch (error) {
+            console.log(`✅ SUCCESS: Transaction was REJECTED`);
+            console.log(`Error: ${error}`);
+            console.log(`\nValue preservation validation is working correctly for native tokens.\n`);
+            expect(String(error)).toMatch(/value|preservation|creating|token/i);
+        }
+    });
+
+    it("should REJECT transaction that destroys native tokens without burning", async () => {
+        console.log(`\n=== Native Token Destruction Without Burning Test ===`);
+
+        // First, we need to create a UTxO with native tokens
+        const policyId = "b".repeat(56);
+        const tokenName = Uint8Array.from(Buffer.from("TestToken"));
+        const tokenAmount = 500n;
+        const adaAmount = 100_000_000n;
+
+        // Create initial UTxO with tokens using experiments helper
+        const address = emulator.getUtxos().values().next().value!.resolved.address;
+        const txHashInit = "c".repeat(64);
+
+        const utxoWithTokens: IUTxO = {
+            utxoRef: { id: txHashInit, index: 0 },
+            resolved: {
+                address: address,
+                value: Value.add(
+                    Value.lovelaces(adaAmount),
+                    Value.singleAsset(new Hash28(policyId), tokenName, tokenAmount)
+                ),
+                datum: undefined,
+                refScript: undefined
+            }
+        };
+
+        // Add this UTxO to the emulator manually
+        const newEmulator = new Emulator([utxoWithTokens], defaultMainnetGenesisInfos, defaultProtocolParameters);
+
+        const utxo = newEmulator.getUtxos().values().next().value!;
+
+        console.log(`Input UTxO value: ${adaAmount} lovelaces + ${tokenAmount} tokens`);
+        console.log(`Policy: ${policyId}`);
+        console.log(`Token: ${tokenName.toString()}`);
+
+        const fee = 1_000_000n;
+        const destroyedTokens = 200n; // Destroying 200 tokens
+
+        console.log(`\nAttempting to destroy ${destroyedTokens} tokens without burning field\n`);
+
+        // Create output with fewer tokens (destroying some)
+        const output = new TxOut({
+            address: utxo.resolved.address,
+            value: Value.add(
+                Value.lovelaces(adaAmount - fee),
+                Value.singleAsset(new Hash28(policyId), tokenName, tokenAmount - destroyedTokens)
+            )
+        });
+
+        const txInput = new TxIn(utxo);
+
+        const txBody = new TxBody({
+            inputs: [txInput],
+            outputs: [output],
+            fee: fee
+            // NOTE: No mint field with negative values - we're trying to destroy tokens!
+        });
+
+        const maliciousTx = new Tx({
+            body: txBody,
+            witnesses: {
+                vkeyWitnesses: [],
+                nativeScripts: undefined,
+                plutusV1Scripts: undefined,
+                plutusV2Scripts: undefined,
+                plutusV3Scripts: undefined,
+                datums: undefined,
+                redeemers: undefined,
+                bootstrapWitnesses: undefined
+            }
+        });
+
+        console.log(`Malicious transaction hash: ${maliciousTx.hash.toString()}`);
+
+        try {
+            const txHash = await newEmulator.submitTx(maliciousTx);
+            console.log(`❌ VULNERABILITY: Transaction was ACCEPTED!`);
+            fail(`Expected transaction to be rejected, but it was accepted with hash: ${txHash}`);
+        } catch (error) {
+            console.log(`✅ SUCCESS: Transaction was REJECTED`);
+            console.log(`Error: ${error}`);
+            console.log(`\nValue preservation validation is working correctly.\n`);
+            expect(String(error)).toMatch(/value|preservation|destroying|token/i);
+        }
+    });
+
+    it("should ACCEPT transaction that properly mints native tokens", async () => {
+        const utxo = emulator.getUtxos().values().next().value!;
+        const inputValue = utxo.resolved.value.lovelaces;
+
+        console.log(`\n=== Native Token Minting Test (Valid) ===`);
+        console.log(`Input UTxO value: ${inputValue} lovelaces (${Number(inputValue) / 1_000_000} ADA)`);
+
+        const policyId = "d".repeat(56);
+        const tokenName = Uint8Array.from(Buffer.from("NewToken"));
+        const mintAmount = 1000n;
+
+        console.log(`Minting ${mintAmount} tokens`);
+        console.log(`Policy: ${policyId}`);
+        console.log(`Token: ${tokenName.toString()}\n`);
+
+        const fee = 1_000_000n;
+
+        // Create output with ADA + minted tokens
+        const output = new TxOut({
+            address: utxo.resolved.address,
+            value: Value.add(
+                Value.lovelaces(inputValue - fee),
+                Value.singleAsset(new Hash28(policyId), tokenName, mintAmount)
+            )
+        });
+
+        const txInput = new TxIn(utxo);
+
+        // Create mint field with positive value (minting)
+        const mintValue = Value.singleAsset(new Hash28(policyId), tokenName, mintAmount);
+
+        const txBody = new TxBody({
+            inputs: [txInput],
+            outputs: [output],
+            fee: fee,
+            mint: mintValue // Proper minting declaration!
+        });
+
+        const validTx = new Tx({
+            body: txBody,
+            witnesses: {
+                vkeyWitnesses: [],
+                nativeScripts: undefined,
+                plutusV1Scripts: undefined,
+                plutusV2Scripts: undefined,
+                plutusV3Scripts: undefined,
+                datums: undefined,
+                redeemers: undefined,
+                bootstrapWitnesses: undefined
+            }
+        });
+
+        console.log(`Valid minting transaction hash: ${validTx.hash.toString()}`);
+        console.log(`Submitting valid minting transaction...\n`);
+
+        try {
+            const txHash = await emulator.submitTx(validTx);
+
+            console.log(`✅ Valid minting transaction accepted`);
+            console.log(`Transaction hash: ${txHash}`);
+            console.log(`\nValue preservation: inputs (0 tokens) + minted (${mintAmount} tokens) = outputs (${mintAmount} tokens) ✓\n`);
+
+            expect(txHash).toBe(validTx.hash.toString());
+        } catch (error) {
+            // If we get here, there's a BUG in the emulator
+            console.log(`❌ BUG: Valid minting transaction was REJECTED`);
+            console.log(`Error: ${error}`);
+            console.log(`\nThe emulator incorrectly rejected a valid minting transaction.\n`);
+
+            fail(`Expected valid minting transaction to be accepted, but it was rejected: ${error}`);
+        }
+    });
+
+    it("should ACCEPT transaction that properly burns native tokens", async () => {
+        console.log(`\n=== Native Token Burning Test (Valid) ===`);
+
+        // Create initial UTxO with tokens
+        const policyId = "e".repeat(56);
+        const tokenName = Uint8Array.from(Buffer.from("BurnToken"));
+        const initialTokens = 500n;
+        const burnAmount = 200n;
+        const adaAmount = 100_000_000n;
+
+        const address = emulator.getUtxos().values().next().value!.resolved.address;
+        const txHashBurn = "f".repeat(64);
+
+        const utxoWithTokens: IUTxO = {
+            utxoRef: { id: txHashBurn, index: 0 },
+            resolved: {
+                address: address,
+                value: Value.add(
+                    Value.lovelaces(adaAmount),
+                    Value.singleAsset(new Hash28(policyId), tokenName, initialTokens)
+                ),
+                datum: undefined,
+                refScript: undefined
+            }
+        };
+
+        const newEmulator = new Emulator([utxoWithTokens], defaultMainnetGenesisInfos, defaultProtocolParameters);
+        const utxo = newEmulator.getUtxos().values().next().value!;
+
+        console.log(`Input UTxO value: ${adaAmount} lovelaces + ${initialTokens} tokens`);
+        console.log(`Policy: ${policyId}`);
+        console.log(`Token: ${tokenName.toString()}`);
+        console.log(`Burning ${burnAmount} tokens\n`);
+
+        const fee = 1_000_000n;
+        const remainingTokens = initialTokens - burnAmount;
+
+        // Create output with remaining tokens
+        const output = new TxOut({
+            address: utxo.resolved.address,
+            value: Value.add(
+                Value.lovelaces(adaAmount - fee),
+                Value.singleAsset(new Hash28(policyId), tokenName, remainingTokens)
+            )
+        });
+
+        const txInput = new TxIn(utxo);
+
+        // Create mint field with NEGATIVE value (burning)
+        const mintValue = Value.singleAsset(new Hash28(policyId), tokenName, -burnAmount);
+
+        const txBody = new TxBody({
+            inputs: [txInput],
+            outputs: [output],
+            fee: fee,
+            mint: mintValue // Proper burning declaration (negative mint)!
+        });
+
+        const validTx = new Tx({
+            body: txBody,
+            witnesses: {
+                vkeyWitnesses: [],
+                nativeScripts: undefined,
+                plutusV1Scripts: undefined,
+                plutusV2Scripts: undefined,
+                plutusV3Scripts: undefined,
+                datums: undefined,
+                redeemers: undefined,
+                bootstrapWitnesses: undefined
+            }
+        });
+
+        console.log(`Valid burning transaction hash: ${validTx.hash.toString()}`);
+        console.log(`Submitting valid burning transaction...\n`);
+
+        try {
+            const txHash = await newEmulator.submitTx(validTx);
+
+            console.log(`✅ Valid burning transaction accepted`);
+            console.log(`Transaction hash: ${txHash}`);
+            console.log(`\nValue preservation: inputs (${initialTokens}) + burned (-${burnAmount}) = outputs (${remainingTokens}) ✓\n`);
+
+            expect(txHash).toBe(validTx.hash.toString());
+        } catch (error) {
+            // If we get here, there's a BUG in the emulator
+            console.log(`❌ BUG: Valid burning transaction was REJECTED`);
+            console.log(`Error: ${error}`);
+            console.log(`\nThe emulator incorrectly rejected a valid burning transaction.\n`);
+
+            fail(`Expected valid burning transaction to be accepted, but it was rejected: ${error}`);
+        }
     });
 });
