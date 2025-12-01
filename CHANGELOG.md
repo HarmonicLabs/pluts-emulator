@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added (2025-12-01)
 
+- **Value Preservation Validation**: Implemented fundamental blockchain rule enforcement
+  - Created modular validation system in `src/validation/` directory
+  - `ValidationResult` interface for consistent error handling across validation rules
+  - `validateValuePreservation()` function checks the equation: `inputs + minted = outputs + fee + burned`
+  - Detailed error messages showing exactly how much value is being created/destroyed
+  - Prevents both ADA creation and destruction attacks
+  - Added comprehensive test suite in `tests/value-preservation.test.ts` (4 tests)
+    - Manual transaction construction tests for edge cases (creating/destroying ADA)
+    - TxBuilder test demonstrating automatic balancing and value preservation
+- **Validation Architecture**: Structured validation system for future rules
+  - `src/validation/types.ts`: Common validation types and helpers
+  - `src/validation/valuePreservation.ts`: Value preservation implementation
+  - `src/validation/index.ts`: Central export point for validation modules
+
+### Added (2025-12-01 - Previous)
+
 - **Queue Methods**: Added `isEmpty()`, `size()`, and `asArray()` methods to the `Queue` class for better test compatibility
 - **Test Helpers**: Created `src/experiments.ts` module with test utility functions:
   - `generateRandomTxHash(index)`: Generates predictable transaction hashes for testing
@@ -23,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added warning message when skipping oversized transactions
 
 ### Changed (2025-12-01)
+
+- **Validation System Refactoring**: Improved error reporting and validation flow
+  - `validateTx()` now returns `ValidationResult` instead of boolean for detailed error messages
+  - `submitTx()` now returns specific validation error messages instead of generic "failed phase-1 validation"
+  - Made `validateTx()`, `processTx()`, `updateLedger()`, `awaitBlock()`, and `awaitSlot()` async for proper validation flow
+  - All phase-1 validation checks now return detailed error messages through `ValidationResult`
+
+### Changed (2025-12-01 - Previous)
 
 - **getUtxos() Return Type**: Changed from `UTxO[]` to `Map<TxOutRefStr, UTxO>` for consistency with internal storage and test expectations
 - **Debug Logging**: Level 0 (errors) now uses `console.warn()` instead of `console.log()` for proper error visibility
@@ -62,14 +86,15 @@ This is the version before the recent test suite fixes. See git history for deta
 
 ### Test Coverage Progress
 - **Before fixes**: 2/10 tests passing (20%)
-- **After fixes**: 37/37 tests passing (100%)
-- **Test Suites**: 4/4 passing
+- **After test suite fixes**: 37/37 tests passing (100%)
+- **After value preservation**: 41/41 tests passing (100%)
+- **Test Suites**: 5/5 passing
 
 ### Code Changes
-- **Files Created**: 2 (experiments.ts, CHANGELOG.md)
-- **Files Modified**: 5 (queue.ts, Emulator.ts, emulator.test.ts, README.md, TODO.md)
-- **Lines Added**: ~350
-- **Issues Resolved**: 8 critical test failures
+- **Files Created**: 6 (experiments.ts, CHANGELOG.md, validation/types.ts, validation/valuePreservation.ts, validation/index.ts, value-preservation.test.ts)
+- **Files Modified**: 6 (queue.ts, Emulator.ts, emulator.test.ts, README.md, TODO.md, CHANGELOG.md)
+- **Lines Added**: ~650
+- **Issues Resolved**: 9 critical issues (8 test failures + 1 security vulnerability)
 
 ---
 
