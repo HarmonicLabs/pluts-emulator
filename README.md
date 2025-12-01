@@ -138,7 +138,7 @@ src/
 - **Provider Pattern**: Drop-in replacement for blockchain providers
 - **Immutability**: UTxO cloning for safe state management
 - **State Machine**: Clear separation between mempool and ledger
-- **Delegation**: Phase 2 validation delegated to battle-tested TxBuilder
+- **Delegation**: Phase 2 validation delegated to TxBuilder
 
 ## Limitations
 
@@ -239,10 +239,6 @@ Contributions welcome! See [TODO.md](TODO.md) for priority improvements needed.
 ## License
 
 See [LICENSE](LICENSE) file.
-
-## Acknowledgments
-
-Built by the HarmonicLabs team and contributors.
 
 ## Support
 
