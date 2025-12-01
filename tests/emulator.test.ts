@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
 
 import { CanResolveToUTxO, TxBuilder, defaultMainnetGenesisInfos, normalizedGenesisInfos } from "@harmoniclabs/buildooor";
-import { defaultProtocolParameters, IUTxO, Tx, UTxO } from "@harmoniclabs/plu-ts";
+import { defaultProtocolParameters, IUTxO, UTxO } from "@harmoniclabs/plu-ts";
 
 import { Emulator } from "../src/Emulator";
 import { experimentFunctions } from "../src/experiments";
@@ -16,7 +16,7 @@ describe("Emulator Tests", () => {
     beforeEach(() => {
         utxosInit = experimentFunctions.createRandomInitialUtxos(2);
         emulator = new Emulator(utxosInit, defaultMainnetGenesisInfos, defaultProtocolParameters);
-        txBuilder = new TxBuilder(defaultProtocolParameters, defaultMainnetGenesisInfos);
+        txBuilder = emulator.txBuilder; // Use the emulator's txBuilder instance
         consoleWarnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
         consoleLogSpy = jest.spyOn(console, "log").mockImplementation(() => {});
     });
@@ -31,7 +31,7 @@ describe("Emulator Tests", () => {
         expect(consoleWarnSpy).toHaveBeenCalledWith("Invalid call to awaitBlock. Argument height must be greater than zero.");
     });
 
-    it("should advance to the next block and clear the mempool", () => {
+    it("should advance to the next block and clear the mempool", async () => {
         // Build and submit a transaction
         const utxo = emulator.getUtxos().values().next().value;
         const tx = txBuilder.buildSync({
@@ -39,7 +39,7 @@ describe("Emulator Tests", () => {
             outputs: [],
             changeAddress: utxo.resolved.address,
         });
-        emulator.submitTx(tx);
+        await emulator.submitTx(tx);
 
         expect(emulator.thisMempool.size()).toBeGreaterThan(0);
 
@@ -51,25 +51,41 @@ describe("Emulator Tests", () => {
         expect(emulator.getUtxos().size).toBeGreaterThan(0); // Ensure UTXOs were updated
     });
 
-    it("should throw warning if transaction is too large to fit in the block", () => {
+    it("should throw warning if transaction is too large to fit in the block", async () => {
         const utxo = emulator.getUtxos().values().next().value;
+
+        // Mock getTxSize FIRST - it will be used during validation
+        const getTxSizeSpy = jest.spyOn(emulator, "getTxSize");
+
         let tx = txBuilder.buildSync({
             inputs: [utxo],
             outputs: [],
             changeAddress: utxo.resolved.address,
         });
 
-        // Mock the `getTxSize` method to return a size greater than the block limit
-        jest.spyOn(emulator, "getTxSize").mockReturnValue(90000);
+        // Get the real size first, then mock to return large size
+        const realSize = tx.toCbor().toBuffer().length;
 
-        // Submit the large transaction to the emulator's mempool
-        emulator.submitTx(tx);
+        // Mock to return normal size during validation, but large size during block processing
+        let callCount = 0;
+        getTxSizeSpy.mockImplementation(() => {
+            callCount++;
+            // First call is during submitTx validation - return normal size
+            if (callCount === 1) return realSize;
+            // Subsequent calls during block processing - return size larger than block limit
+            return 90000;
+        });
 
-        // Process a block
+        // Submit the transaction (will pass validation with normal size)
+        await emulator.submitTx(tx);
+
+        // Process a block (will skip transaction due to mocked large size)
         emulator.awaitBlock(1);
 
         // Verify the warning was logged
         expect(consoleWarnSpy).toHaveBeenCalledWith("Transaction too large to fit in block. Skipping transaction.");
+
+        getTxSizeSpy.mockRestore();
     })
 
     it('should return the genesis infos', async () => {
@@ -281,7 +297,7 @@ describe("Emulator Tests", () => {
         expect(emulator.thisMempool.peek()).toBe(mockTx);
     });
 
-    it("should reject an invalid transaction", async () => {
+    it("should accept a valid transaction with change output", async () => {
         const utxo = emulator.getUtxos().values().next().value;
         let tx = txBuilder.buildSync({
             inputs: [utxo],
@@ -297,21 +313,24 @@ describe("Emulator Tests", () => {
     });
 
     it("should handle a transaction submitted as CBOR string", async () => {
-        const mockTx = {
-            hash: { toString: jest.fn().mockReturnValue("mockTxHash") },
-        } as unknown as Tx;
+        // Use a real transaction instead of a mock
+        const utxo = emulator.getUtxos().values().next().value!;
+        const realTx = txBuilder.buildSync({
+            inputs: [utxo],
+            outputs: [],
+            changeAddress: utxo.resolved.address,
+        });
 
-        jest.spyOn(Tx, "fromCbor").mockReturnValue(mockTx);
+        // Get the CBOR string from the real transaction
+        const txCbor = realTx.toCbor().toString();
 
         // Submit the transaction as CBOR
-        const txCbor = "mockCborString";
         const txHash = await emulator.submitTx(txCbor);
 
         // Assertions
-        expect(Tx.fromCbor).toHaveBeenCalledWith(txCbor);
-        expect(txHash).toBe("mockTxHash");
+        expect(txHash).toBe(realTx.hash.toString());
         expect(emulator.thisMempool.size()).toBe(1);
-        expect(emulator.thisMempool.peek()).toBe(mockTx);
+        expect(emulator.thisMempool.peek()?.hash.toString()).toBe(realTx.hash.toString());
     });
 
     // Tests for: getTxSize
