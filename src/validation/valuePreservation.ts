@@ -14,33 +14,105 @@ function getAssetId(policyId: string, assetName: Uint8Array): AssetId {
 }
 
 /**
+ * Adds a quantity to an asset in the map
+ */
+function addToAssetMap(assetMap: Map<AssetId, bigint>, assetId: AssetId, quantity: bigint): void {
+    const current = assetMap.get(assetId) || BigInt(0);
+    assetMap.set(assetId, current + quantity);
+}
+
+/**
  * Adds assets from a Value to the asset map
  */
 function addValueToMap(value: Value, assetMap: Map<AssetId, bigint>, multiply: number = 1): void {
     // Add lovelaces (ADA)
-    const currentAda = assetMap.get('lovelaces') || BigInt(0);
-    assetMap.set('lovelaces', currentAda + value.lovelaces * BigInt(multiply));
+    addToAssetMap(assetMap, 'lovelaces', value.lovelaces * BigInt(multiply));
 
-    // Add native tokens (skip lovelaces which have empty policy)
+    // Add native tokens
     for (const policyEntry of value.map) {
         const policyId = policyEntry.policy.toString();
 
-        // Skip entries with empty policy (these represent lovelaces, already counted above)
-        if (!policyId || policyId === '' || policyId === '00'.repeat(28)) {
+        // Skip entries with empty/invalid policy ID
+        if (!policyId || policyId === '') {
             continue;
         }
 
         for (const asset of policyEntry.assets) {
-            // Skip entries with empty asset name that represent lovelaces
+            // Skip entries with empty asset name
             if (asset.name.length === 0) {
                 continue;
             }
 
             const assetId = getAssetId(policyId, asset.name);
-            const currentAmount = assetMap.get(assetId) || BigInt(0);
-            assetMap.set(assetId, currentAmount + asset.quantity * BigInt(multiply));
+            addToAssetMap(assetMap, assetId, asset.quantity * BigInt(multiply));
         }
     }
+}
+
+/**
+ * Checks value preservation for a single asset
+ * Formula: inputs_value + minted_value = outputs_value + burned_value + fee
+ */
+function checkAssetPreservation(
+    assetId: AssetId,
+    inputAssets: Map<AssetId, bigint>,
+    outputAssets: Map<AssetId, bigint>,
+    mintedAssets: Map<AssetId, bigint>,
+    burnedAssets: Map<AssetId, bigint>,
+    transactionFee: bigint
+): ValidationResult | null {
+    const inputAmount = inputAssets.get(assetId) || BigInt(0);
+    const outputAmount = outputAssets.get(assetId) || BigInt(0);
+    const mintedAmount = mintedAssets.get(assetId) || BigInt(0);
+    const burnedAmount = burnedAssets.get(assetId) || BigInt(0);
+
+    // For ADA, include fee on the right side
+    const feeAmount = (assetId === 'lovelaces') ? transactionFee : BigInt(0);
+
+    // Calculate both sides of the equation
+    const leftSide = inputAmount + mintedAmount;
+    const rightSide = outputAmount + burnedAmount + feeAmount;
+
+    if (leftSide !== rightSide) {
+        const difference = leftSide - rightSide;
+
+        // Format asset name for error message
+        const isAda = assetId === 'lovelaces';
+        const assetName = isAda ? 'ADA' : assetId;
+        const differenceAda = isAda ? Number(difference) / 1_000_000 : Number(difference);
+
+        let errorMessage: string;
+        if (difference > 0) {
+            errorMessage = isAda
+                ? `Value not preserved: destroying ${Math.abs(differenceAda)} ADA`
+                : `Value not preserved: destroying ${Math.abs(differenceAda)} of token ${assetName}`;
+        } else {
+            errorMessage = isAda
+                ? `Value not preserved: creating ${Math.abs(differenceAda)} ADA from nothing`
+                : `Value not preserved: creating ${Math.abs(differenceAda)} of token ${assetName} from nothing`;
+        }
+
+        return validationFailure(errorMessage, {
+            asset: assetId,
+            inputAmount: inputAmount.toString(),
+            outputAmount: outputAmount.toString(),
+            mintedAmount: mintedAmount.toString(),
+            burnedAmount: burnedAmount.toString(),
+            feeAmount: feeAmount.toString(),
+            leftSide: leftSide.toString(),
+            rightSide: rightSide.toString(),
+            difference: difference.toString(),
+            differenceFormatted: isAda ? `${differenceAda.toFixed(6)} ADA` : `${differenceAda} ${assetName}`,
+            equation: {
+                expected: `${inputAmount} + ${mintedAmount} = ${outputAmount} + ${burnedAmount} + ${feeAmount}`,
+                leftSide: leftSide.toString(),
+                rightSide: rightSide.toString(),
+                valid: false
+            }
+        });
+    }
+
+    return null;
 }
 
 /**
@@ -48,7 +120,7 @@ function addValueToMap(value: Value, assetMap: Map<AssetId, bigint>, multiply: n
  *
  * The fundamental rule of blockchain: value cannot be created or destroyed.
  *
- * Formula: inputs_value + minted_value = outputs_value + fee
+ * Formula: inputs_value + minted_value = outputs_value + burned_value + fee
  *
  * This applies to ALL assets (ADA + native tokens):
  * - For ADA: inputs = outputs + fee (cannot mint/burn ADA)
@@ -67,6 +139,7 @@ export function validateValuePreservation(
         const inputAssets = new Map<AssetId, bigint>();
         const outputAssets = new Map<AssetId, bigint>();
         const mintedAssets = new Map<AssetId, bigint>();
+        const burnedAssets = new Map<AssetId, bigint>();
 
         // 1. Calculate total input value (all assets)
         const missingInputs: string[] = [];
@@ -95,75 +168,72 @@ export function validateValuePreservation(
             addValueToMap(output.value, outputAssets);
         }
 
-        // 3. Add fee to outputs (fee is paid in ADA)
-        const fee = tx.body.fee;
-        const currentOutputAda = outputAssets.get('lovelaces') || BigInt(0);
-        outputAssets.set('lovelaces', currentOutputAda + fee);
-
-        // 4. Calculate minted/burned value (all assets)
+        // 3. Calculate minted and burned values (all assets)
         if (tx.body.mint) {
-            addValueToMap(tx.body.mint, mintedAssets);
+            // Separate positive (minted) and negative (burned) amounts
+            for (const policyEntry of tx.body.mint.map) {
+                const policyId = policyEntry.policy.toString();
+
+                // Skip entries with empty/invalid policy ID
+                if (!policyId || policyId === '') {
+                    continue;
+                }
+
+                for (const asset of policyEntry.assets) {
+                    // Skip entries with empty asset name
+                    if (asset.name.length === 0) {
+                        continue;
+                    }
+
+                    const assetId = getAssetId(policyId, asset.name);
+                    const quantity = asset.quantity;
+
+                    if (quantity > BigInt(0)) {
+                        // Positive = minted
+                        addToAssetMap(mintedAssets, assetId, quantity);
+                    } else if (quantity < BigInt(0)) {
+                        // Negative = burned (store as positive value)
+                        addToAssetMap(burnedAssets, assetId, -quantity);
+                    }
+                }
+            }
 
             // Check that ADA is never minted or burned
             const mintedAda = mintedAssets.get('lovelaces') || BigInt(0);
-            if (mintedAda !== BigInt(0)) {
+            const burnedAda = burnedAssets.get('lovelaces') || BigInt(0);
+            if (mintedAda !== BigInt(0) || burnedAda !== BigInt(0)) {
                 return validationFailure(
                     `Cannot mint or burn lovelaces (ADA)`,
-                    { attemptedMint: mintedAda.toString() }
+                    {
+                        attemptedMint: mintedAda.toString(),
+                        attemptedBurn: burnedAda.toString()
+                    }
                 );
             }
         }
 
-        // 5. Get all unique asset IDs from inputs, outputs, and minting
+        // 4. Get all unique asset IDs from all maps
         const allAssetIds = new Set<AssetId>([
             ...inputAssets.keys(),
             ...outputAssets.keys(),
-            ...mintedAssets.keys()
+            ...mintedAssets.keys(),
+            ...burnedAssets.keys()
         ]);
 
-        // 6. Check value preservation for EACH asset
-        // Formula: inputs[asset] + minted[asset] = outputs[asset]
+        // 5. Check value preservation for EACH asset
+        // Formula: inputs_value + minted_value = outputs_value + burned_value + fee
         for (const assetId of allAssetIds) {
-            const inputAmount = inputAssets.get(assetId) || BigInt(0);
-            const outputAmount = outputAssets.get(assetId) || BigInt(0);
-            const mintedAmount = mintedAssets.get(assetId) || BigInt(0);
+            const validationError = checkAssetPreservation(
+                assetId,
+                inputAssets,
+                outputAssets,
+                mintedAssets,
+                burnedAssets,
+                tx.body.fee
+            );
 
-            // Check: inputs + minted = outputs
-            const expectedOutput = inputAmount + mintedAmount;
-
-            if (expectedOutput !== outputAmount) {
-                const difference = expectedOutput - outputAmount;
-
-                // Format asset name for error message
-                const isAda = assetId === 'lovelaces';
-                const assetName = isAda ? 'ADA' : assetId;
-                const differenceAda = isAda ? Number(difference) / 1_000_000 : Number(difference);
-
-                let errorMessage: string;
-                if (difference > 0) {
-                    errorMessage = isAda
-                        ? `Value not preserved: destroying ${Math.abs(differenceAda)} ADA`
-                        : `Value not preserved: destroying ${Math.abs(differenceAda)} of token ${assetName}`;
-                } else {
-                    errorMessage = isAda
-                        ? `Value not preserved: creating ${Math.abs(differenceAda)} ADA from nothing`
-                        : `Value not preserved: creating ${Math.abs(differenceAda)} of token ${assetName} from nothing`;
-                }
-
-                return validationFailure(errorMessage, {
-                    asset: assetId,
-                    inputAmount: inputAmount.toString(),
-                    outputAmount: outputAmount.toString(),
-                    mintedAmount: mintedAmount.toString(),
-                    expectedOutput: expectedOutput.toString(),
-                    difference: difference.toString(),
-                    differenceFormatted: isAda ? `${differenceAda.toFixed(6)} ADA` : `${differenceAda} ${assetName}`,
-                    equation: {
-                        expected: `${inputAmount} + ${mintedAmount} = ${expectedOutput}`,
-                        actual: `${inputAmount} + ${mintedAmount} = ${outputAmount}`,
-                        valid: false
-                    }
-                });
+            if (validationError) {
+                return validationError;
             }
         }
 

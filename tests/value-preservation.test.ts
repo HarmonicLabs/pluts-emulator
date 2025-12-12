@@ -17,6 +17,171 @@ import { defaultProtocolParameters } from "@harmoniclabs/plu-ts";
 import { Emulator } from "../src/Emulator";
 import { experimentFunctions } from "../src/experiments";
 
+// ==================== TEST CONSTANTS ====================
+
+const STANDARD_FEE = 1_000_000n;
+const STANDARD_ADA_AMOUNT = 100_000_000n;
+
+// ==================== TEST HELPERS ====================
+
+/**
+ * Helper to create a policy ID by repeating a character
+ */
+function createPolicyId(char: string): string {
+    return char.repeat(56);
+}
+
+/**
+ * Helper to create a token name from a string
+ */
+function createTokenName(name: string): Uint8Array {
+    return Uint8Array.from(Buffer.from(name));
+}
+
+/**
+ * Helper to create empty transaction witnesses
+ */
+function createEmptyWitnesses() {
+    return {
+        vkeyWitnesses: [],
+        nativeScripts: undefined,
+        plutusV1Scripts: undefined,
+        plutusV2Scripts: undefined,
+        plutusV3Scripts: undefined,
+        datums: undefined,
+        redeemers: undefined,
+        bootstrapWitnesses: undefined
+    };
+}
+
+/**
+ * Helper to create a transaction
+ */
+function createTx(txBody: TxBody): Tx {
+    return new Tx({
+        body: txBody,
+        witnesses: createEmptyWitnesses()
+    });
+}
+
+/**
+ * Helper to create a UTxO with native tokens
+ */
+function createUtxoWithTokens(
+    address: Address,
+    txHash: string,
+    adaAmount: bigint,
+    tokens: Array<{ policyId: string; tokenName: Uint8Array; amount: bigint }>
+): IUTxO {
+    let value = Value.lovelaces(adaAmount);
+    for (const token of tokens) {
+        value = Value.add(
+            value,
+            Value.singleAsset(new Hash28(token.policyId), token.tokenName, token.amount)
+        );
+    }
+
+    return {
+        utxoRef: { id: txHash, index: 0 },
+        resolved: {
+            address,
+            value,
+            datum: undefined,
+            refScript: undefined
+        }
+    };
+}
+
+/**
+ * Helper to format lovelaces as ADA
+ */
+function toAda(lovelaces: bigint): number {
+    return Number(lovelaces) / 1_000_000;
+}
+
+/**
+ * Helper to log UTxO value information
+ */
+function logUtxoValue(inputValue: bigint, label: string = "Input UTxO value") {
+    console.log(`${label}: ${inputValue} lovelaces (${toAda(inputValue)} ADA)`);
+}
+
+/**
+ * Helper to log fee and output value
+ */
+function logFeeAndOutput(fee: bigint, outputValue: bigint) {
+    console.log(`Fee: ${fee} lovelaces (${toAda(fee)} ADA)`);
+    console.log(`Output value: ${outputValue} lovelaces (${toAda(outputValue)} ADA)`);
+}
+
+/**
+ * Helper to log value preservation equation
+ */
+function logValuePreservation(inputValue: bigint, outputValue: bigint, fee: bigint, valid: boolean = true) {
+    console.log(`\nValue preserved: inputs (${inputValue}) = outputs (${outputValue}) + fee (${fee})`);
+    console.log(`Verification: ${inputValue} ${valid ? '=' : '≠'} ${outputValue + fee} ${valid ? '✓' : '✗'}\n`);
+}
+
+/**
+ * Helper to log value violation
+ */
+function logValueViolation(
+    type: 'creating' | 'destroying',
+    amount: bigint,
+    inputValue: bigint,
+    outputValue: bigint,
+    fee: bigint,
+    assetType: 'ADA' | 'tokens' = 'ADA'
+) {
+    const amountFormatted = assetType === 'ADA' ? `${toAda(amount)} ADA` : `${amount} tokens`;
+    console.log(`\nViolation: ${type === 'creating' ? 'Creating' : 'Destroying'} ${amount} lovelaces (${amountFormatted}) ${type === 'creating' ? 'out of thin air' : ''}!`);
+    console.log(`Expected equation: inputs (${inputValue}) = outputs (${outputValue}) + fee (${fee})`);
+    console.log(`Actual: ${inputValue} ≠ ${outputValue + fee}`);
+    const difference = type === 'creating' ? (outputValue + fee) - inputValue : inputValue - (outputValue + fee);
+    console.log(`Difference: ${difference} lovelaces ${type === 'creating' ? 'stolen' : 'destroyed'}!\n`);
+}
+
+/**
+ * Helper to assert transaction rejection with proper error checking
+ */
+async function expectTransactionRejection(
+    emulator: Emulator,
+    tx: Tx,
+    errorPattern: RegExp,
+    testName: string
+) {
+    try {
+        const txHash = await emulator.submitTx(tx);
+        console.log(`❌ VULNERABILITY: Transaction was ACCEPTED!`);
+        console.log(`Transaction hash: ${txHash}\n`);
+        fail(`${testName}: Expected transaction to be rejected, but it was accepted with hash: ${txHash}`);
+    } catch (error) {
+        console.log(`✅ SUCCESS: Transaction was REJECTED`);
+        console.log(`Error: ${error}\n`);
+        expect(String(error)).toMatch(errorPattern);
+    }
+}
+
+/**
+ * Helper to assert transaction acceptance
+ */
+async function expectTransactionAcceptance(
+    emulator: Emulator,
+    tx: Tx,
+    testName: string
+) {
+    try {
+        const txHash = await emulator.submitTx(tx);
+        console.log(`✅ Transaction accepted (as expected)`);
+        console.log(`Transaction hash: ${txHash}\n`);
+        expect(txHash).toBe(tx.hash.toString());
+    } catch (error) {
+        console.log(`❌ BUG: Transaction was REJECTED`);
+        console.log(`Error: ${error}\n`);
+        fail(`${testName}: Expected transaction to be accepted, but it was rejected: ${error}`);
+    }
+}
+
 describe("Value Preservation Vulnerability Tests", () => {
     let emulator: Emulator;
     let utxosInit: IUTxO[];
@@ -27,161 +192,79 @@ describe("Value Preservation Vulnerability Tests", () => {
     });
 
     it("should REJECT transaction that creates ADA out of thin air (value preservation check)", async () => {
-        // Get a UTxO with 100 ADA
         const utxo = emulator.getUtxos().values().next().value!;
         const inputValue = utxo.resolved.value.lovelaces;
 
         console.log(`\n=== Value Preservation Vulnerability Test ===`);
-        console.log(`Input UTxO value: ${inputValue} lovelaces (${Number(inputValue) / 1_000_000} ADA)`);
+        logUtxoValue(inputValue);
 
-        // Manually construct a transaction that violates value preservation
-        // Inputs: 100 ADA
-        // Outputs: 150 ADA (creating 50 ADA out of thin air!)
-        // Fee: 1 ADA
-        // This should FAIL but will currently PASS
+        const stolenAda = 50_000_000n;
+        const fee = STANDARD_FEE;
+        const outputValue = inputValue + stolenAda;
 
-        const stolenAda = 50_000_000n; // 50 ADA we're creating from nothing
-        const fee = 1_000_000n; // 1 ADA fee
-        const outputValue = inputValue + stolenAda; // More than input!
+        logFeeAndOutput(fee, outputValue);
+        logValueViolation('creating', stolenAda, inputValue, outputValue, fee);
 
-        console.log(`Fee: ${fee} lovelaces (${Number(fee) / 1_000_000} ADA)`);
-        console.log(`Output value: ${outputValue} lovelaces (${Number(outputValue) / 1_000_000} ADA)`);
-        console.log(`\nViolation: Creating ${stolenAda} lovelaces (${Number(stolenAda) / 1_000_000} ADA) out of thin air!`);
-        console.log(`Expected equation: inputs (${inputValue}) = outputs (${outputValue}) + fee (${fee})`);
-        console.log(`Actual: ${inputValue} ≠ ${outputValue + fee}`);
-        console.log(`Difference: ${(outputValue + fee) - inputValue} lovelaces stolen!\n`);
-
-        // Create output with MORE value than input
         const output = new TxOut({
             address: utxo.resolved.address,
             value: Value.lovelaces(outputValue)
         });
 
-        // Manually construct transaction body with proper TxIn
-        const txInput = new TxIn(utxo);
-
         const txBody = new TxBody({
-            inputs: [txInput],
+            inputs: [new TxIn(utxo)],
             outputs: [output],
             fee: fee
         });
 
-        // Create the malicious transaction
-        const maliciousTx = new Tx({
-            body: txBody,
-            witnesses: {
-                vkeyWitnesses: [], // Empty - we're not signing
-                nativeScripts: undefined,
-                plutusV1Scripts: undefined,
-                plutusV2Scripts: undefined,
-                plutusV3Scripts: undefined,
-                datums: undefined,
-                redeemers: undefined,
-                bootstrapWitnesses: undefined
-            }
-        });
+        const maliciousTx = createTx(txBody);
 
         console.log(`Malicious transaction hash: ${maliciousTx.hash.toString()}`);
         console.log(`Attempting to submit transaction that creates ADA from nothing...\n`);
 
-        try {
-            // This should FAIL with "Value not preserved" error
-            const txHash = await emulator.submitTx(maliciousTx);
-
-            // If we get here, the validation is NOT working
-            console.log(`❌ VULNERABILITY STILL EXISTS: Transaction was ACCEPTED!`);
-            console.log(`Transaction hash: ${txHash}`);
-            console.log(`\nThe emulator accepted a transaction that creates ${Number(stolenAda) / 1_000_000} ADA out of thin air.`);
-
-            // This should NOT happen - fail the test
-            fail(`Expected transaction to be rejected, but it was accepted with hash: ${txHash}`);
-
-        } catch (error) {
-            // This is what SHOULD happen - validation caught it!
-            console.log(`✅ SUCCESS: Transaction was REJECTED`);
-            console.log(`Error: ${error}`);
-            console.log(`\nValue preservation validation is working correctly.\n`);
-
-            // Verify the error message mentions value preservation
-            expect(String(error)).toMatch(/value|preservation|creating/i);
-        }
+        await expectTransactionRejection(
+            emulator,
+            maliciousTx,
+            /value|preservation|creating/i,
+            "ADA creation test"
+        );
+        console.log(`Value preservation validation is working correctly.\n`);
     });
 
     it("should REJECT transaction that destroys ADA (value preservation check)", async () => {
-        // Get a UTxO with 100 ADA
         const utxo = emulator.getUtxos().values().next().value!;
         const inputValue = utxo.resolved.value.lovelaces;
 
         console.log(`\n=== ADA Destruction Vulnerability Test ===`);
-        console.log(`Input UTxO value: ${inputValue} lovelaces (${Number(inputValue) / 1_000_000} ADA)`);
+        logUtxoValue(inputValue);
 
-        // Manually construct a transaction that destroys ADA
-        // Inputs: 100 ADA
-        // Outputs: 40 ADA
-        // Fee: 1 ADA
-        // Missing: 59 ADA (destroyed)
+        const destroyedAda = 59_000_000n;
+        const fee = STANDARD_FEE;
+        const outputValue = inputValue - destroyedAda - fee;
 
-        const destroyedAda = 59_000_000n; // 59 ADA destroyed
-        const fee = 1_000_000n; // 1 ADA fee
-        const outputValue = inputValue - destroyedAda - fee; // Much less than input!
-
-        console.log(`Fee: ${fee} lovelaces (${Number(fee) / 1_000_000} ADA)`);
-        console.log(`Output value: ${outputValue} lovelaces (${Number(outputValue) / 1_000_000} ADA)`);
-        console.log(`\nViolation: Destroying ${destroyedAda} lovelaces (${Number(destroyedAda) / 1_000_000} ADA)!`);
-        console.log(`Expected equation: inputs (${inputValue}) = outputs (${outputValue}) + fee (${fee})`);
-        console.log(`Actual: ${inputValue} ≠ ${outputValue + fee}`);
-        console.log(`Difference: ${inputValue - (outputValue + fee)} lovelaces destroyed!\n`);
-
-        const output = new TxOut({
-            address: utxo.resolved.address,
-            value: Value.lovelaces(outputValue)
-        });
-
-        const txInput = new TxIn(utxo);
+        logFeeAndOutput(fee, outputValue);
+        logValueViolation('destroying', destroyedAda, inputValue, outputValue, fee);
 
         const txBody = new TxBody({
-            inputs: [txInput],
-            outputs: [output],
+            inputs: [new TxIn(utxo)],
+            outputs: [new TxOut({
+                address: utxo.resolved.address,
+                value: Value.lovelaces(outputValue)
+            })],
             fee: fee
         });
 
-        const maliciousTx = new Tx({
-            body: txBody,
-            witnesses: {
-                vkeyWitnesses: [],
-                nativeScripts: undefined,
-                plutusV1Scripts: undefined,
-                plutusV2Scripts: undefined,
-                plutusV3Scripts: undefined,
-                datums: undefined,
-                redeemers: undefined,
-                bootstrapWitnesses: undefined
-            }
-        });
+        const maliciousTx = createTx(txBody);
 
         console.log(`Malicious transaction hash: ${maliciousTx.hash.toString()}`);
         console.log(`Attempting to submit transaction that destroys ADA...\n`);
 
-        try {
-            const txHash = await emulator.submitTx(maliciousTx);
-
-            // If we get here, the validation is NOT working
-            console.log(`❌ VULNERABILITY STILL EXISTS: Transaction was ACCEPTED!`);
-            console.log(`Transaction hash: ${txHash}`);
-            console.log(`\nThe emulator accepted a transaction that destroys ${Number(destroyedAda) / 1_000_000} ADA.\n`);
-
-            // This should NOT happen - fail the test
-            fail(`Expected transaction to be rejected, but it was accepted with hash: ${txHash}`);
-
-        } catch (error) {
-            // This is what SHOULD happen - validation caught it!
-            console.log(`✅ SUCCESS: Transaction was REJECTED`);
-            console.log(`Error: ${error}`);
-            console.log(`\nValue preservation validation is working correctly.\n`);
-
-            // Verify the error message mentions value preservation
-            expect(String(error)).toMatch(/value|preservation|destroying/i);
-        }
+        await expectTransactionRejection(
+            emulator,
+            maliciousTx,
+            /value|preservation|destroying/i,
+            "ADA destruction test"
+        );
+        console.log(`Value preservation validation is working correctly.\n`);
     });
 
     it("should ACCEPT valid transaction with correct value preservation", async () => {
@@ -189,62 +272,29 @@ describe("Value Preservation Vulnerability Tests", () => {
         const inputValue = utxo.resolved.value.lovelaces;
 
         console.log(`\n=== Valid Transaction Test (Control) ===`);
-        console.log(`Input UTxO value: ${inputValue} lovelaces (${Number(inputValue) / 1_000_000} ADA)`);
+        logUtxoValue(inputValue);
 
-        // This one should work - proper value preservation
-        const fee = 1_000_000n; // 1 ADA fee
-        const outputValue = inputValue - fee; // Exactly input minus fee
+        const fee = STANDARD_FEE;
+        const outputValue = inputValue - fee;
 
-        console.log(`Fee: ${fee} lovelaces (${Number(fee) / 1_000_000} ADA)`);
-        console.log(`Output value: ${outputValue} lovelaces (${Number(outputValue) / 1_000_000} ADA)`);
-        console.log(`\nValue preserved: inputs (${inputValue}) = outputs (${outputValue}) + fee (${fee})`);
-        console.log(`Verification: ${inputValue} = ${outputValue + fee} ✓\n`);
-
-        const output = new TxOut({
-            address: utxo.resolved.address,
-            value: Value.lovelaces(outputValue)
-        });
-
-        const txInput = new TxIn(utxo);
+        logFeeAndOutput(fee, outputValue);
+        logValuePreservation(inputValue, outputValue, fee, true);
 
         const txBody = new TxBody({
-            inputs: [txInput],
-            outputs: [output],
+            inputs: [new TxIn(utxo)],
+            outputs: [new TxOut({
+                address: utxo.resolved.address,
+                value: Value.lovelaces(outputValue)
+            })],
             fee: fee
         });
 
-        const validTx = new Tx({
-            body: txBody,
-            witnesses: {
-                vkeyWitnesses: [],
-                nativeScripts: undefined,
-                plutusV1Scripts: undefined,
-                plutusV2Scripts: undefined,
-                plutusV3Scripts: undefined,
-                datums: undefined,
-                redeemers: undefined,
-                bootstrapWitnesses: undefined
-            }
-        });
+        const validTx = createTx(txBody);
 
         console.log(`Valid transaction hash: ${validTx.hash.toString()}`);
         console.log(`Submitting valid transaction...\n`);
 
-        try {
-            const txHash = await emulator.submitTx(validTx);
-
-            console.log(`✅ Valid transaction accepted (as expected)`);
-            console.log(`Transaction hash: ${txHash}\n`);
-
-            expect(txHash).toBe(validTx.hash.toString());
-        } catch (error) {
-            // If we get here, there's a BUG in the emulator (not a vulnerability)
-            console.log(`❌ BUG: Valid transaction was REJECTED`);
-            console.log(`Error: ${error}`);
-            console.log(`\nThe emulator incorrectly rejected a valid transaction that preserves value correctly.\n`);
-
-            fail(`Expected valid transaction to be accepted, but it was rejected: ${error}`);
-        }
+        await expectTransactionAcceptance(emulator, validTx, "Valid transaction test");
     });
 
     it("should demonstrate TxBuilder automatically balances transactions", async () => {
@@ -252,20 +302,15 @@ describe("Value Preservation Vulnerability Tests", () => {
         const inputValue = utxo.resolved.value.lovelaces;
 
         console.log(`\n=== TxBuilder Test (Automatic Balancing) ===`);
-        console.log(`Input UTxO value: ${inputValue} lovelaces (${Number(inputValue) / 1_000_000} ADA)`);
+        logUtxoValue(inputValue);
 
-        // Build transaction using TxBuilder
-        // TxBuilder will automatically:
-        // 1. Calculate the minimum fee
-        // 2. Create change output if needed
-        // 3. Ensure value preservation
-        const sendAmount = 50_000_000n; // 50 ADA
+        const sendAmount = 50_000_000n;
         const output = new TxOut({
             address: utxo.resolved.address,
             value: Value.lovelaces(sendAmount)
         });
 
-        console.log(`Sending: ${sendAmount} lovelaces (${Number(sendAmount) / 1_000_000} ADA)`);
+        console.log(`Sending: ${sendAmount} lovelaces (${toAda(sendAmount)} ADA)`);
         console.log(`TxBuilder will automatically calculate fee and create change output\n`);
 
         // Build the transaction - this will automatically balance it
@@ -279,7 +324,7 @@ describe("Value Preservation Vulnerability Tests", () => {
         console.log(`Transaction hash: ${tx.hash.toString()}`);
         console.log(`Number of inputs: ${tx.body.inputs.length}`);
         console.log(`Number of outputs: ${tx.body.outputs.length}`);
-        console.log(`Fee: ${tx.body.fee} lovelaces (${Number(tx.body.fee) / 1_000_000} ADA)`);
+        console.log(`Fee: ${tx.body.fee} lovelaces (${toAda(tx.body.fee)} ADA)`);
 
         // Calculate actual value preservation
         let totalInputValue = 0n;
@@ -294,34 +339,19 @@ describe("Value Preservation Vulnerability Tests", () => {
         let totalOutputValue = 0n;
         for (const output of tx.body.outputs) {
             totalOutputValue += output.value.lovelaces;
-            console.log(`  Output: ${output.value.lovelaces} lovelaces (${Number(output.value.lovelaces) / 1_000_000} ADA)`);
+            console.log(`  Output: ${output.value.lovelaces} lovelaces (${toAda(output.value.lovelaces)} ADA)`);
         }
 
         console.log(`\nValue preservation check:`);
-        console.log(`  Total inputs: ${totalInputValue} lovelaces (${Number(totalInputValue) / 1_000_000} ADA)`);
-        console.log(`  Total outputs: ${totalOutputValue} lovelaces (${Number(totalOutputValue) / 1_000_000} ADA)`);
-        console.log(`  Fee: ${tx.body.fee} lovelaces (${Number(tx.body.fee) / 1_000_000} ADA)`);
+        console.log(`  Total inputs: ${totalInputValue} lovelaces (${toAda(totalInputValue)} ADA)`);
+        console.log(`  Total outputs: ${totalOutputValue} lovelaces (${toAda(totalOutputValue)} ADA)`);
+        console.log(`  Fee: ${tx.body.fee} lovelaces (${toAda(tx.body.fee)} ADA)`);
         console.log(`  Verification: ${totalInputValue} = ${totalOutputValue + tx.body.fee} ✓\n`);
 
-        // Submit the transaction - should succeed
-        try {
-            const txHash = await emulator.submitTx(tx);
+        await expectTransactionAcceptance(emulator, tx, "TxBuilder test");
 
-            console.log(`✅ TxBuilder transaction accepted`);
-            console.log(`Transaction hash: ${txHash}\n`);
-
-            expect(txHash).toBe(tx.hash.toString());
-
-            // Verify value preservation manually
-            expect(totalInputValue).toBe(totalOutputValue + tx.body.fee);
-        } catch (error) {
-            // If we get here, there's a BUG in the emulator
-            console.log(`❌ BUG: TxBuilder-generated transaction was REJECTED`);
-            console.log(`Error: ${error}`);
-            console.log(`\nThe emulator incorrectly rejected a transaction built by TxBuilder.\n`);
-
-            fail(`Expected TxBuilder transaction to be accepted, but it was rejected: ${error}`);
-        }
+        // Verify value preservation manually
+        expect(totalInputValue).toBe(totalOutputValue + tx.body.fee);
     });
 
     // ==================== NATIVE TOKEN TESTS ====================
@@ -331,155 +361,96 @@ describe("Value Preservation Vulnerability Tests", () => {
         const inputValue = utxo.resolved.value.lovelaces;
 
         console.log(`\n=== Native Token Creation Without Minting Test ===`);
-        console.log(`Input UTxO value: ${inputValue} lovelaces (${Number(inputValue) / 1_000_000} ADA)`);
+        logUtxoValue(inputValue);
 
-        // Create a fake policy ID and token name
-        const fakePolicyId = "a".repeat(56); // 28 bytes = 56 hex chars
-        const fakeTokenName = Uint8Array.from(Buffer.from("MyToken"));
+        const fakePolicyId = createPolicyId("a");
+        const fakeTokenName = createTokenName("MyToken");
         const stolenTokens = 1000n;
 
         console.log(`Attempting to create ${stolenTokens} tokens without minting`);
         console.log(`Policy: ${fakePolicyId}`);
         console.log(`Token: ${fakeTokenName.toString()}\n`);
 
-        const fee = 1_000_000n;
-
-        // Create output with ADA + native tokens (but no input tokens!)
-        // Start with ADA value
-        const adaValue = Value.lovelaces(inputValue - fee);
-        // Add native tokens to it
-        const outputValue = Value.add(
-            adaValue,
-            Value.singleAsset(new Hash28(fakePolicyId), fakeTokenName, stolenTokens)
-        );
-
-        const output = new TxOut({
-            address: utxo.resolved.address,
-            value: outputValue
-        });
-
-        const txInput = new TxIn(utxo);
+        const fee = STANDARD_FEE;
 
         const txBody = new TxBody({
-            inputs: [txInput],
-            outputs: [output],
+            inputs: [new TxIn(utxo)],
+            outputs: [new TxOut({
+                address: utxo.resolved.address,
+                value: Value.add(
+                    Value.lovelaces(inputValue - fee),
+                    Value.singleAsset(new Hash28(fakePolicyId), fakeTokenName, stolenTokens)
+                )
+            })],
             fee: fee
-            // NOTE: No mint field - we're trying to create tokens from nothing!
         });
 
-        const maliciousTx = new Tx({
-            body: txBody,
-            witnesses: {
-                vkeyWitnesses: [],
-                nativeScripts: undefined,
-                plutusV1Scripts: undefined,
-                plutusV2Scripts: undefined,
-                plutusV3Scripts: undefined,
-                datums: undefined,
-                redeemers: undefined,
-                bootstrapWitnesses: undefined
-            }
-        });
+        const maliciousTx = createTx(txBody);
 
         console.log(`Malicious transaction hash: ${maliciousTx.hash.toString()}`);
         console.log(`Attempting to submit transaction that creates tokens without minting...\n`);
 
-        try {
-            const txHash = await emulator.submitTx(maliciousTx);
-            console.log(`❌ VULNERABILITY: Transaction was ACCEPTED!`);
-            fail(`Expected transaction to be rejected, but it was accepted with hash: ${txHash}`);
-        } catch (error) {
-            console.log(`✅ SUCCESS: Transaction was REJECTED`);
-            console.log(`Error: ${error}`);
-            console.log(`\nValue preservation validation is working correctly for native tokens.\n`);
-            expect(String(error)).toMatch(/value|preservation|creating|token/i);
-        }
+        await expectTransactionRejection(
+            emulator,
+            maliciousTx,
+            /value|preservation|creating|token/i,
+            "Token creation test"
+        );
+        console.log(`Value preservation validation is working correctly for native tokens.\n`);
     });
 
     it("should REJECT transaction that destroys native tokens without burning", async () => {
         console.log(`\n=== Native Token Destruction Without Burning Test ===`);
 
-        // First, we need to create a UTxO with native tokens
-        const policyId = "b".repeat(56);
-        const tokenName = Uint8Array.from(Buffer.from("TestToken"));
+        const policyId = createPolicyId("b");
+        const tokenName = createTokenName("TestToken");
         const tokenAmount = 500n;
-        const adaAmount = 100_000_000n;
+        const adaAmount = STANDARD_ADA_AMOUNT;
 
-        // Create initial UTxO with tokens using experiments helper
         const address = emulator.getUtxos().values().next().value!.resolved.address;
-        const txHashInit = "c".repeat(64);
 
-        const utxoWithTokens: IUTxO = {
-            utxoRef: { id: txHashInit, index: 0 },
-            resolved: {
-                address: address,
-                value: Value.add(
-                    Value.lovelaces(adaAmount),
-                    Value.singleAsset(new Hash28(policyId), tokenName, tokenAmount)
-                ),
-                datum: undefined,
-                refScript: undefined
-            }
-        };
+        const utxoWithTokens = createUtxoWithTokens(
+            address,
+            "c".repeat(64),
+            adaAmount,
+            [{ policyId, tokenName, amount: tokenAmount }]
+        );
 
-        // Add this UTxO to the emulator manually
         const newEmulator = new Emulator([utxoWithTokens], defaultMainnetGenesisInfos, defaultProtocolParameters);
-
         const utxo = newEmulator.getUtxos().values().next().value!;
 
         console.log(`Input UTxO value: ${adaAmount} lovelaces + ${tokenAmount} tokens`);
         console.log(`Policy: ${policyId}`);
         console.log(`Token: ${tokenName.toString()}`);
 
-        const fee = 1_000_000n;
-        const destroyedTokens = 200n; // Destroying 200 tokens
+        const fee = STANDARD_FEE;
+        const destroyedTokens = 200n;
 
         console.log(`\nAttempting to destroy ${destroyedTokens} tokens without burning field\n`);
 
-        // Create output with fewer tokens (destroying some)
-        const output = new TxOut({
-            address: utxo.resolved.address,
-            value: Value.add(
-                Value.lovelaces(adaAmount - fee),
-                Value.singleAsset(new Hash28(policyId), tokenName, tokenAmount - destroyedTokens)
-            )
-        });
-
-        const txInput = new TxIn(utxo);
-
         const txBody = new TxBody({
-            inputs: [txInput],
-            outputs: [output],
+            inputs: [new TxIn(utxo)],
+            outputs: [new TxOut({
+                address: utxo.resolved.address,
+                value: Value.add(
+                    Value.lovelaces(adaAmount - fee),
+                    Value.singleAsset(new Hash28(policyId), tokenName, tokenAmount - destroyedTokens)
+                )
+            })],
             fee: fee
-            // NOTE: No mint field with negative values - we're trying to destroy tokens!
         });
 
-        const maliciousTx = new Tx({
-            body: txBody,
-            witnesses: {
-                vkeyWitnesses: [],
-                nativeScripts: undefined,
-                plutusV1Scripts: undefined,
-                plutusV2Scripts: undefined,
-                plutusV3Scripts: undefined,
-                datums: undefined,
-                redeemers: undefined,
-                bootstrapWitnesses: undefined
-            }
-        });
+        const maliciousTx = createTx(txBody);
 
         console.log(`Malicious transaction hash: ${maliciousTx.hash.toString()}`);
 
-        try {
-            const txHash = await newEmulator.submitTx(maliciousTx);
-            console.log(`❌ VULNERABILITY: Transaction was ACCEPTED!`);
-            fail(`Expected transaction to be rejected, but it was accepted with hash: ${txHash}`);
-        } catch (error) {
-            console.log(`✅ SUCCESS: Transaction was REJECTED`);
-            console.log(`Error: ${error}`);
-            console.log(`\nValue preservation validation is working correctly.\n`);
-            expect(String(error)).toMatch(/value|preservation|destroying|token/i);
-        }
+        await expectTransactionRejection(
+            newEmulator,
+            maliciousTx,
+            /value|preservation|destroying|token/i,
+            "Token destruction test"
+        );
+        console.log(`Value preservation validation is working correctly.\n`);
     });
 
     it("should ACCEPT transaction that properly mints native tokens", async () => {
@@ -487,99 +458,57 @@ describe("Value Preservation Vulnerability Tests", () => {
         const inputValue = utxo.resolved.value.lovelaces;
 
         console.log(`\n=== Native Token Minting Test (Valid) ===`);
-        console.log(`Input UTxO value: ${inputValue} lovelaces (${Number(inputValue) / 1_000_000} ADA)`);
+        logUtxoValue(inputValue);
 
-        const policyId = "d".repeat(56);
-        const tokenName = Uint8Array.from(Buffer.from("NewToken"));
+        const policyId = createPolicyId("d");
+        const tokenName = createTokenName("NewToken");
         const mintAmount = 1000n;
 
         console.log(`Minting ${mintAmount} tokens`);
         console.log(`Policy: ${policyId}`);
         console.log(`Token: ${tokenName.toString()}\n`);
 
-        const fee = 1_000_000n;
-
-        // Create output with ADA + minted tokens
-        const output = new TxOut({
-            address: utxo.resolved.address,
-            value: Value.add(
-                Value.lovelaces(inputValue - fee),
-                Value.singleAsset(new Hash28(policyId), tokenName, mintAmount)
-            )
-        });
-
-        const txInput = new TxIn(utxo);
-
-        // Create mint field with positive value (minting)
-        const mintValue = Value.singleAsset(new Hash28(policyId), tokenName, mintAmount);
+        const fee = STANDARD_FEE;
 
         const txBody = new TxBody({
-            inputs: [txInput],
-            outputs: [output],
+            inputs: [new TxIn(utxo)],
+            outputs: [new TxOut({
+                address: utxo.resolved.address,
+                value: Value.add(
+                    Value.lovelaces(inputValue - fee),
+                    Value.singleAsset(new Hash28(policyId), tokenName, mintAmount)
+                )
+            })],
             fee: fee,
-            mint: mintValue // Proper minting declaration!
+            mint: Value.singleAsset(new Hash28(policyId), tokenName, mintAmount)
         });
 
-        const validTx = new Tx({
-            body: txBody,
-            witnesses: {
-                vkeyWitnesses: [],
-                nativeScripts: undefined,
-                plutusV1Scripts: undefined,
-                plutusV2Scripts: undefined,
-                plutusV3Scripts: undefined,
-                datums: undefined,
-                redeemers: undefined,
-                bootstrapWitnesses: undefined
-            }
-        });
+        const validTx = createTx(txBody);
 
         console.log(`Valid minting transaction hash: ${validTx.hash.toString()}`);
         console.log(`Submitting valid minting transaction...\n`);
 
-        try {
-            const txHash = await emulator.submitTx(validTx);
-
-            console.log(`✅ Valid minting transaction accepted`);
-            console.log(`Transaction hash: ${txHash}`);
-            console.log(`\nValue preservation: inputs (0 tokens) + minted (${mintAmount} tokens) = outputs (${mintAmount} tokens) ✓\n`);
-
-            expect(txHash).toBe(validTx.hash.toString());
-        } catch (error) {
-            // If we get here, there's a BUG in the emulator
-            console.log(`❌ BUG: Valid minting transaction was REJECTED`);
-            console.log(`Error: ${error}`);
-            console.log(`\nThe emulator incorrectly rejected a valid minting transaction.\n`);
-
-            fail(`Expected valid minting transaction to be accepted, but it was rejected: ${error}`);
-        }
+        await expectTransactionAcceptance(emulator, validTx, "Token minting test");
+        console.log(`Value preservation: inputs (0 tokens) + minted (${mintAmount} tokens) = outputs (${mintAmount} tokens) ✓\n`);
     });
 
     it("should ACCEPT transaction that properly burns native tokens", async () => {
         console.log(`\n=== Native Token Burning Test (Valid) ===`);
 
-        // Create initial UTxO with tokens
-        const policyId = "e".repeat(56);
-        const tokenName = Uint8Array.from(Buffer.from("BurnToken"));
+        const policyId = createPolicyId("e");
+        const tokenName = createTokenName("BurnToken");
         const initialTokens = 500n;
         const burnAmount = 200n;
-        const adaAmount = 100_000_000n;
+        const adaAmount = STANDARD_ADA_AMOUNT;
 
         const address = emulator.getUtxos().values().next().value!.resolved.address;
-        const txHashBurn = "f".repeat(64);
 
-        const utxoWithTokens: IUTxO = {
-            utxoRef: { id: txHashBurn, index: 0 },
-            resolved: {
-                address: address,
-                value: Value.add(
-                    Value.lovelaces(adaAmount),
-                    Value.singleAsset(new Hash28(policyId), tokenName, initialTokens)
-                ),
-                datum: undefined,
-                refScript: undefined
-            }
-        };
+        const utxoWithTokens = createUtxoWithTokens(
+            address,
+            "f".repeat(64),
+            adaAmount,
+            [{ policyId, tokenName, amount: initialTokens }]
+        );
 
         const newEmulator = new Emulator([utxoWithTokens], defaultMainnetGenesisInfos, defaultProtocolParameters);
         const utxo = newEmulator.getUtxos().values().next().value!;
@@ -589,62 +518,221 @@ describe("Value Preservation Vulnerability Tests", () => {
         console.log(`Token: ${tokenName.toString()}`);
         console.log(`Burning ${burnAmount} tokens\n`);
 
-        const fee = 1_000_000n;
+        const fee = STANDARD_FEE;
         const remainingTokens = initialTokens - burnAmount;
 
-        // Create output with remaining tokens
-        const output = new TxOut({
-            address: utxo.resolved.address,
-            value: Value.add(
-                Value.lovelaces(adaAmount - fee),
-                Value.singleAsset(new Hash28(policyId), tokenName, remainingTokens)
-            )
-        });
-
-        const txInput = new TxIn(utxo);
-
-        // Create mint field with NEGATIVE value (burning)
-        const mintValue = Value.singleAsset(new Hash28(policyId), tokenName, -burnAmount);
-
         const txBody = new TxBody({
-            inputs: [txInput],
-            outputs: [output],
+            inputs: [new TxIn(utxo)],
+            outputs: [new TxOut({
+                address: utxo.resolved.address,
+                value: Value.add(
+                    Value.lovelaces(adaAmount - fee),
+                    Value.singleAsset(new Hash28(policyId), tokenName, remainingTokens)
+                )
+            })],
             fee: fee,
-            mint: mintValue // Proper burning declaration (negative mint)!
+            mint: Value.singleAsset(new Hash28(policyId), tokenName, -burnAmount)
         });
 
-        const validTx = new Tx({
-            body: txBody,
-            witnesses: {
-                vkeyWitnesses: [],
-                nativeScripts: undefined,
-                plutusV1Scripts: undefined,
-                plutusV2Scripts: undefined,
-                plutusV3Scripts: undefined,
-                datums: undefined,
-                redeemers: undefined,
-                bootstrapWitnesses: undefined
-            }
-        });
+        const validTx = createTx(txBody);
 
         console.log(`Valid burning transaction hash: ${validTx.hash.toString()}`);
         console.log(`Submitting valid burning transaction...\n`);
 
-        try {
-            const txHash = await newEmulator.submitTx(validTx);
+        await expectTransactionAcceptance(newEmulator, validTx, "Token burning test");
+        console.log(`Value preservation: inputs (${initialTokens}) + burned (-${burnAmount}) = outputs (${remainingTokens}) ✓\n`);
+    });
 
-            console.log(`✅ Valid burning transaction accepted`);
-            console.log(`Transaction hash: ${txHash}`);
-            console.log(`\nValue preservation: inputs (${initialTokens}) + burned (-${burnAmount}) = outputs (${remainingTokens}) ✓\n`);
+    it("should REJECT transaction attempting to mint ADA", async () => {
+        const utxo = emulator.getUtxos().values().next().value!;
+        const inputValue = utxo.resolved.value.lovelaces;
 
-            expect(txHash).toBe(validTx.hash.toString());
-        } catch (error) {
-            // If we get here, there's a BUG in the emulator
-            console.log(`❌ BUG: Valid burning transaction was REJECTED`);
-            console.log(`Error: ${error}`);
-            console.log(`\nThe emulator incorrectly rejected a valid burning transaction.\n`);
+        console.log(`\n=== ADA Minting Test (Should Fail) ===`);
+        logUtxoValue(inputValue);
 
-            fail(`Expected valid burning transaction to be accepted, but it was rejected: ${error}`);
-        }
+        const fee = STANDARD_FEE;
+        const mintedAda = 50_000_000n;
+
+        console.log(`Attempting to mint ${toAda(mintedAda)} ADA (should be rejected)\n`);
+
+        const txBody = new TxBody({
+            inputs: [new TxIn(utxo)],
+            outputs: [new TxOut({
+                address: utxo.resolved.address,
+                value: Value.lovelaces(inputValue - fee + mintedAda)
+            })],
+            fee: fee,
+            mint: Value.lovelaces(mintedAda)
+        });
+
+        const maliciousTx = createTx(txBody);
+
+        console.log(`Malicious transaction hash: ${maliciousTx.hash.toString()}`);
+
+        await expectTransactionRejection(
+            emulator,
+            maliciousTx,
+            /cannot mint|burn|lovelaces|ada/i,
+            "ADA minting test"
+        );
+        console.log(`Properly rejected attempt to mint ADA.\n`);
+    });
+
+    it("should REJECT transaction attempting to burn ADA", async () => {
+        const utxo = emulator.getUtxos().values().next().value!;
+        const inputValue = utxo.resolved.value.lovelaces;
+
+        console.log(`\n=== ADA Burning Test (Should Fail) ===`);
+        logUtxoValue(inputValue);
+
+        const fee = STANDARD_FEE;
+        const burnedAda = 30_000_000n;
+
+        console.log(`Attempting to burn ${toAda(burnedAda)} ADA via mint field (should be rejected)\n`);
+
+        // Use empty policy ID to represent ADA in mint field (this simulates the attack)
+        const emptyPolicy = createPolicyId("0");
+        const txBody = new TxBody({
+            inputs: [new TxIn(utxo)],
+            outputs: [new TxOut({
+                address: utxo.resolved.address,
+                value: Value.lovelaces(inputValue - fee - burnedAda)
+            })],
+            fee: fee,
+            mint: Value.singleAsset(new Hash28(emptyPolicy), new Uint8Array(), -burnedAda)
+        });
+
+        const maliciousTx = createTx(txBody);
+
+        console.log(`Malicious transaction hash: ${maliciousTx.hash.toString()}`);
+
+        await expectTransactionRejection(
+            emulator,
+            maliciousTx,
+            /cannot mint|burn|lovelaces|ada/i,
+            "ADA burning test"
+        );
+        console.log(`Properly rejected attempt to burn ADA.\n`);
+    });
+
+    it("should handle multiple native tokens in same transaction", async () => {
+        console.log(`\n=== Multiple Native Tokens Test ===`);
+
+        const policy1 = createPolicyId("1");
+        const policy2 = createPolicyId("2");
+        const token1Name = createTokenName("Token1");
+        const token2Name = createTokenName("Token2");
+        const token1Amount = 100n;
+        const token2Amount = 200n;
+        const adaAmount = STANDARD_ADA_AMOUNT;
+
+        const address = emulator.getUtxos().values().next().value!.resolved.address;
+
+        const utxoWithMultipleTokens = createUtxoWithTokens(
+            address,
+            "9".repeat(64),
+            adaAmount,
+            [
+                { policyId: policy1, tokenName: token1Name, amount: token1Amount },
+                { policyId: policy2, tokenName: token2Name, amount: token2Amount }
+            ]
+        );
+
+        const newEmulator = new Emulator([utxoWithMultipleTokens], defaultMainnetGenesisInfos, defaultProtocolParameters);
+        const utxo = newEmulator.getUtxos().values().next().value!;
+
+        console.log(`Input UTxO value: ${adaAmount} lovelaces + ${token1Amount} Token1 + ${token2Amount} Token2`);
+
+        const fee = STANDARD_FEE;
+        const mintToken1 = 50n;
+        const burnToken2 = 50n;
+
+        console.log(`Minting ${mintToken1} Token1, Burning ${burnToken2} Token2\n`);
+
+        const txBody = new TxBody({
+            inputs: [new TxIn(utxo)],
+            outputs: [new TxOut({
+                address: utxo.resolved.address,
+                value: Value.add(
+                    Value.add(
+                        Value.lovelaces(adaAmount - fee),
+                        Value.singleAsset(new Hash28(policy1), token1Name, token1Amount + mintToken1)
+                    ),
+                    Value.singleAsset(new Hash28(policy2), token2Name, token2Amount - burnToken2)
+                )
+            })],
+            fee: fee,
+            mint: Value.add(
+                Value.singleAsset(new Hash28(policy1), token1Name, mintToken1),
+                Value.singleAsset(new Hash28(policy2), token2Name, -burnToken2)
+            )
+        });
+
+        const validTx = createTx(txBody);
+
+        console.log(`Valid multi-token transaction hash: ${validTx.hash.toString()}`);
+
+        await expectTransactionAcceptance(newEmulator, validTx, "Multi-token test");
+        console.log(`Value preservation maintained for all assets ✓\n`);
+    });
+
+    it("should handle multiple inputs with different tokens", async () => {
+        console.log(`\n=== Multiple Inputs with Tokens Test ===`);
+
+        const policy1 = createPolicyId("a");
+        const policy2 = createPolicyId("b");
+        const token1Name = createTokenName("TokenA");
+        const token2Name = createTokenName("TokenB");
+        const token1Amount = 100n;
+        const token2Amount = 200n;
+        const adaAmount1 = 50_000_000n;
+        const adaAmount2 = 50_000_000n;
+
+        const address = emulator.getUtxos().values().next().value!.resolved.address;
+
+        const utxo1 = createUtxoWithTokens(
+            address,
+            "1".repeat(64),
+            adaAmount1,
+            [{ policyId: policy1, tokenName: token1Name, amount: token1Amount }]
+        );
+
+        const utxo2 = createUtxoWithTokens(
+            address,
+            "2".repeat(64),
+            adaAmount2,
+            [{ policyId: policy2, tokenName: token2Name, amount: token2Amount }]
+        );
+
+        const newEmulator = new Emulator([utxo1, utxo2], defaultMainnetGenesisInfos, defaultProtocolParameters);
+        const utxos = Array.from(newEmulator.getUtxos().values());
+
+        console.log(`Input 1: ${adaAmount1} lovelaces + ${token1Amount} TokenA`);
+        console.log(`Input 2: ${adaAmount2} lovelaces + ${token2Amount} TokenB`);
+
+        const fee = STANDARD_FEE;
+        const totalAda = adaAmount1 + adaAmount2;
+
+        const txBody = new TxBody({
+            inputs: [new TxIn(utxos[0]), new TxIn(utxos[1])],
+            outputs: [new TxOut({
+                address: address,
+                value: Value.add(
+                    Value.add(
+                        Value.lovelaces(totalAda - fee),
+                        Value.singleAsset(new Hash28(policy1), token1Name, token1Amount)
+                    ),
+                    Value.singleAsset(new Hash28(policy2), token2Name, token2Amount)
+                )
+            })],
+            fee: fee
+        });
+
+        const validTx = createTx(txBody);
+
+        console.log(`Valid multi-input transaction hash: ${validTx.hash.toString()}`);
+
+        await expectTransactionAcceptance(newEmulator, validTx, "Multi-input test");
+        console.log(`Value preservation maintained across multiple inputs ✓\n`);
     });
 });
