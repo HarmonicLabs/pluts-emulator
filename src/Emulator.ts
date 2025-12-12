@@ -87,7 +87,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
         if( !isProtocolParameters( protocolParameters ) ) protocolParameters = defaultProtocolParameters;
         this.protocolParameters = protocolParameters;
         this.txBuilder = new TxBuilder( this.protocolParameters, this.genesisInfos );
-
+        
         // Initialize the time and slot based on the genesis information
         this.time = this.genesisInfos.systemStartPosixMs;
         this.slot = this.genesisInfos.startSlotNo;
@@ -221,68 +221,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
         return output;
     }
 
-    /** Print a UTxO to console (for testing)
-      * @param utxo UTxO to print
-      * @param debugLevel Debug level for verbosity
-      * @returns void
-    */
-    printUtxo(utxo: UTxO, debugLevel: number = 0): void {
-        console.log("UTxO Ref ID:", utxo.utxoRef.id.toString());
-        console.log("UTxO Ref Index:", utxo.utxoRef.index);
-
-        const address = utxo.resolved.address;
-
-        if (debugLevel > 2 && address.type) {
-            console.log("Address Type:", address.type);
-        }
-
-        console.log("Network:", address.network);
-
-        if (address.paymentCreds) {
-            console.log("Payment Credentials:", address.paymentCreds);
-        }
-
-        if (address.stakeCreds) {
-            console.log("Stake Credentials:", address.stakeCreds);
-        }
-
-        console.log("Value: {");
-        console.log("  Assets:");
-
-        const value = utxo.resolved.value;
-        for (const asset of value.map) {
-            console.log("    Policy:", asset.policy.toString());
-            for (const token of asset.assets) {
-                if (token.name.length === 0) {
-                    console.log("      Asset: lovelaces");
-                } else {
-                    console.log("      Asset:", Buffer.from(token.name).toString());
-                }
-                console.log("      Quantity:", Number(token.quantity));
-            }
-        }
-
-        if (utxo.resolved.datum) {
-            console.log("  Datum:", utxo.resolved.datum);
-        }
-
-        if (utxo.resolved.refScript) {
-            console.log("  Reference Script:", utxo.resolved.refScript);
-        }
-    }
-
-    /** Print multiple UTxOs to console (for testing)
-      * @param utxos Map of UTxOs to print
-      * @param debugLevel Debug level for verbosity
-      * @returns void
-    */
-    printUtxos(utxos: Map<TxOutRefStr, UTxO>, debugLevel: number = 0): void {
-        for (const utxo of utxos.values()) {
-            this.printUtxo(utxo, debugLevel);
-        }
-    }
-
-
+    
     /** Pretty print the ledger state
      * @param detailed Whether to show detailed information (default: false)
      * @return Pretty printed string of the entire ledger state
@@ -403,12 +342,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
     }
 
     /** Getters */
-
-    /** Get the mempool queue */
-    get thisMempool(): Queue<Tx> {
-        return this.mempool;
-    }
-
+    
     /** Get genesis information */
     getGenesisInfos(): Promise<GenesisInfos>
     {
@@ -446,9 +380,9 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
     }
 
     /** Returns the set of UTxOs */
-    getUtxos(): Map<TxOutRefStr, UTxO>
+    getUtxos(): UTxO[]
     {
-        return this.utxos;
+        return Array.from( this.utxos.values() );
     }
 
     /**
@@ -518,23 +452,12 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             let color : string;
 
             switch (level) {
-                case 0:
-                    color = COLOR_CODES.RED;
-                    console.warn(message);
-                    break;
-                case 1:
-                    color = COLOR_CODES.YELLOW;
-                    console.log(`${color}[Emulator Debug level ${level}]: ${COLOR_CODES.RESET}${message}`);
-                    break;
-                case 2:
-                    color = COLOR_CODES.GREEN;
-                    console.log(`${color}[Emulator Debug level ${level}]: ${COLOR_CODES.RESET}${message}`);
-                    break;
-                default:
-                    color = COLOR_CODES.RESET;
-                    console.log(`${color}[Emulator Debug level ${level}]: ${COLOR_CODES.RESET}${message}`);
-                    break;
+                case 0: color = COLOR_CODES.RED; break;
+                case 1: color = COLOR_CODES.YELLOW; break;
+                case 2: color = COLOR_CODES.GREEN; break;
+                default: color = COLOR_CODES.RESET; break;
             }
+            console.log(`${color}[Emulator Debug level ${level}]: ${COLOR_CODES.RESET}${message}`);
         }
 
     }
@@ -659,7 +582,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
      */
     awaitBlock(blocks: number = 1): void {
         if (blocks <= 0) {
-            this.debug(0,"Invalid call to awaitBlock. Argument height must be greater than zero.");
+            this.debug(0,"Invalid call to awaitBlock. Argument blocks must be greater than zero.");
             return;
         }
 
@@ -747,12 +670,6 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             // Get the size of the transaction
             const txSize = this.getTxSize(nextTx);
             if (currentBlockSize + txSize > maxBlockBodySize) {
-                // Check if transaction is too large for any block (not just this one)
-                if (txSize > maxBlockBodySize) {
-                    this.debug(0, "Transaction too large to fit in block. Skipping transaction.");
-                    this.mempool.dequeue(); // Remove the transaction from mempool
-                    continue; // Try next transaction
-                }
                 this.debug(2, `Next transaction, of size ${txSize}, will not fit in the block. Current block size: ${currentBlockSize}.`);
                 break; // Block is full, process next transaction in the next block
             }
