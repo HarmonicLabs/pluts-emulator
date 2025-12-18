@@ -41,6 +41,7 @@ import {
 
 import {Queue} from "./queue"
 import { createInitialUTxO, generateRandomTxHash } from "./utils/helper";
+import { validateValuePreservation, ValidationResult, validationSuccess, validationFailure } from "./validation";
 
 export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtocolParameters, IResolveUTxOs, ISubmitTx
 {
@@ -657,7 +658,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
      * Advance to a future block
      * @param blocks Number of blocks to advance
      */
-    awaitBlock(blocks: number = 1): void {
+    async awaitBlock(blocks: number = 1): Promise<void> {
         if (blocks <= 0) {
             this.debug(0,"Invalid call to awaitBlock. Argument height must be greater than zero.");
             return;
@@ -674,7 +675,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
 
         while (this.mempool.length > 0 && blockProcessed < blocks) {
             this.debug(2, `Processing block ${blockProcessed + 1} of ${blocks}`);
-            this.updateLedger();
+            await this.updateLedger();
             blockProcessed ++;
         }
 
@@ -688,7 +689,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
      * @param slots Number of slots to advance
      * @returns void
      * */
-    awaitSlot(slots: number = 1): void {
+    async awaitSlot(slots: number = 1): Promise<void> {
         if (slots <= 0) {
             this.debug(0,"Invalid call to awaitSlot. Argument slots must be greater than zero.");
             return;
@@ -704,7 +705,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             let blocksToBeProcessed = this.blockHeight - currentHeight;
             this.debug(2, `Processing ${blocksToBeProcessed} blocks`);
             while (blocksToBeProcessed > 0 && this.mempool.length > 0) {
-                this.updateLedger();
+                await this.updateLedger();
                 blocksToBeProcessed --;
             }
 
@@ -717,9 +718,9 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
         }
     }
 
-    
+
     /** Update the ledger by processing the mempool, respecting the block size limit */
-    private updateLedger(): void {
+    private async updateLedger(): Promise<void> {
         this.debug(1, `Updating ledger, mempool length: ${this.mempool.length}`);
 
         // Check if the mempool is empty. Should not happen here.
@@ -766,8 +767,8 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
                 break;
             }
             try {
-                // Process the transaction 
-                this.processTx(tx);
+                // Process the transaction
+                await this.processTx(tx);
 
                 // Calculate the fee
                 totalFees += tx.body.fee;
@@ -801,18 +802,18 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
       * @param tx Transaction to process
       * @returns void
      */
-    private processTx(tx: Tx): void {
+    private async processTx(tx: Tx): Promise<void> {
         const txHash = tx.hash.toString();
-        
-        this.debug(1, `Processing transaction ${txHash}`);
-        const isValidTx = this.validateTx(tx);
 
-        if (!isValidTx) {
-            this.debug(0, `Transaction ${txHash} failed validation on-chain. Skipping.`);
+        this.debug(1, `Processing transaction ${txHash}`);
+        const validationResult = await this.validateTx(tx);
+
+        if (!validationResult.isValid) {
+            this.debug(0, `Transaction ${txHash} failed validation on-chain: ${validationResult.error}`);
             // TODO: Add collateral slashing
             // this.debug(0, `Slashing collateral for transaction ${txHash}`);
             // this.slashCollateral(tx);
-            // 
+            //
             return;
         }
 
@@ -879,8 +880,8 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
         this.debug(1, `Submitting transaction ${tx.hash.toString()}`);
         this.debug(1, `Transaction body: ${JSON.stringify(tx.body)}`);
 
-        const isValidTx = await this.validateTx(tx);
-        if (isValidTx) {
+        const validationResult = await this.validateTx(tx);
+        if (validationResult.isValid) {
             this.debug(1, `Transaction ${tx.hash.toString()} has passed phase-1 validation. Proceeding for phase-2.`);
             const phase2ValidTx = await this.txBuilder.validatePhaseTwo(tx);
             this.debug(1, `Phase2 validation result: ${await this.txBuilder.validatePhaseTwoVerbose(tx)} `);
@@ -895,7 +896,8 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
                 return Promise.reject(`Transaction ${tx.hash.toString()} failed phase-2 validation.`);
             }
         } else {
-            return Promise.reject(`Transaction ${tx.hash.toString()} failed phase-1 validation.`);
+            // Return the specific validation error instead of a generic message
+            return Promise.reject(validationResult.error || `Transaction ${tx.hash.toString()} failed phase-1 validation.`);
         }
     }
 
@@ -903,15 +905,15 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
      * Validate a transaction against the current state
      * @param tx Transaction to validate
      */
-    private async validateTx(tx: Tx): Promise<boolean> {
+    private async validateTx(tx: Tx): Promise<ValidationResult> {
         const txHash = tx.hash.toString();
-        
+
         this.debug(2, `Validating transaction: ${txHash}`);
-        
+
         // 0. Check that the transaction is well-formed
         if (!tx.body) {
             this.debug(0,"Invalid transaction: no body.");
-            return false;
+            return validationFailure("Invalid transaction: no body");
         }
 
         // 1. Check that the inputs are present in the ledger
@@ -919,46 +921,56 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             const inputStr = forceTxOutRefStr(input);
             if (!this.utxos.has(inputStr)) {
                 this.debug(0,`Input ${inputStr} not found in the ledger.`);
-                return false;
+                return validationFailure(`Input ${inputStr} not found in the ledger`);
             }
         }
-        
+
 
         // 2. Check that the transaction has at least one input
         // Note: A Tx can have no output: e.g. https://cexplorer.io/tx/d2a2098fabb73ace002e2cf7bf7131a56723cd0745b1ef1a4f9e29fd27c0eb68
         if (tx.body.inputs.length === 0) {
              this.debug(0, "Transaction must have at least one input or mint tokens");
-             return false;
+             return validationFailure("Transaction must have at least one input or mint tokens");
         }
 
         // 3. Check for duplicate inputs
         const inputSet = new Set<string>();
         for (const input of tx.body.inputs) {
             const inputStr = forceTxOutRefStr(input);
-            
+
             if (inputSet.has(inputStr)) {
                 this.debug(0,`Duplicate input detected: ${inputStr}`);
-                return false;
+                return validationFailure(`Duplicate input detected: ${inputStr}`);
             }
             inputSet.add(inputStr);
         }
-        
+
         // 4. Check transaction size against limit
         const txSize = this.getTxSize(tx);
         const maxTxSize = this.protocolParameters.maxTxSize;
         if (txSize > maxTxSize) {
             this.debug(0,`Transaction size (${txSize} bytes) exceeds maximum allowed size (${maxTxSize} bytes)`);
-            return false;
+            return validationFailure(`Transaction size (${txSize} bytes) exceeds maximum allowed size (${maxTxSize} bytes)`);
         }
 
         // 5. Collateral presence check for phase 1
         if (!this.validateCollateral(tx)) {
             this.debug(0, `Insufficient collateral. Atleast 5 ADA collateral is required for script inputs.`);
-            return false;
+            return validationFailure("Insufficient collateral. Atleast 5 ADA collateral is required for script inputs");
         }
-        
+
+        // 6. Value preservation check - THE FUNDAMENTAL BLOCKCHAIN RULE
+        const valuePreservationResult = validateValuePreservation(tx, this.utxos);
+        if (!valuePreservationResult.isValid) {
+            this.debug(0, `Value preservation check failed: ${valuePreservationResult.error}`);
+            if (valuePreservationResult.details) {
+                this.debug(1, `Value preservation details: ${JSON.stringify(valuePreservationResult.details, null, 2)}`);
+            }
+            return valuePreservationResult; // Return the detailed validation result
+        }
+
         this.debug(2, `Transaction ${txHash} is valid`);
-        return true;
+        return validationSuccess();
 
     }
 
