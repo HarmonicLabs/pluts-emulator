@@ -959,6 +959,15 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             return false;
         }
 
+        // 6. Check outputs for minimum ADA requirement
+        for (const output of tx.body.outputs) {
+            const minAda = this.txBuilder.getMinimumOutputLovelaces(output)
+            if (output.value.lovelaces < minAda) {
+                this.debug(0, `Output ${JSON.stringify(output)} has insufficient ADA: ${output.value.lovelaces} lovelaces provided, but ${minAda} required.`);
+                return false;
+            }
+        }
+
         // 7. Collateral presence check for phase 1
         if (!this.validateCollateral(tx)) {
             this.debug(0, `Insufficient collateral. Atleast 5 ADA collateral is required for script inputs.`);
