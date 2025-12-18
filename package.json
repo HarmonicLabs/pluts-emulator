@@ -67,7 +67,7 @@
   },
   "homepage": "https://github.com/HarmonicLabs/plu-ts#readme",
   "dependencies": {
-    "@harmoniclabs/buildooor": "^0.1.10",
+    "@harmoniclabs/buildooor": "0.1.10",
     "@harmoniclabs/obj-utils": "^1.0.0",
     "@harmoniclabs/plu-ts": "^0.9.0",
     "@harmoniclabs/uint8array-utils": "^1.0.3",

@@ -1,10 +1,9 @@
 import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
 
-import { CanResolveToUTxO, TxBuilder, defaultMainnetGenesisInfos, normalizedGenesisInfos } from "@harmoniclabs/buildooor";
-import { defaultProtocolParameters, IUTxO, UTxO } from "@harmoniclabs/plu-ts";
+import { CanResolveToUTxO, TxBuilder, defaultMainnetGenesisInfos, normalizedGenesisInfos, defaultProtocolParameters, IUTxO, Tx, UTxO } from "@harmoniclabs/buildooor";
 
 import { Emulator } from "../src/Emulator";
-import { experimentFunctions } from "../src/experiments";
+import { experimentFunctions } from "../src/experiment";
 
 describe("Emulator Tests", () => {
     let emulator: Emulator;
@@ -310,6 +309,75 @@ describe("Emulator Tests", () => {
 
         // Assertions
         expect(emulator.thisMempool.size()).toBe(1);
+    });
+
+    it("should reject a transaction with zero fee", async () => {
+        const utxo = emulator.getUtxos().values().next().value;
+        const tx = txBuilder.buildSync({
+            inputs: [utxo],
+            outputs: [],
+            changeAddress: utxo.resolved.address,
+            fee: BigInt(0), // Zero fee
+        });
+
+        await expect(emulator.submitTx(tx)).rejects.toMatch(/Insufficient fee/);
+    });
+
+    it("should reject a transaction with insufficient fee", async () => {
+        const utxo = emulator.getUtxos().values().next().value;
+        const tx = txBuilder.buildSync({
+            inputs: [utxo],
+            outputs: [],
+            changeAddress: utxo.resolved.address,
+            fee: BigInt(10), // Insufficient fee
+        });
+
+        const minFee = emulator.calculateMinFee(tx);
+        expect(minFee).toBeGreaterThan(BigInt(10)); // Ensure the fee is insufficient
+
+        await expect(emulator.submitTx(tx)).rejects.toMatch(/Insufficient fee/);
+    });
+
+    it("should accept a transaction with exact minimum fee", async () => {
+        const utxo = emulator.getUtxos().values().next().value;
+        let tx = txBuilder.buildSync({
+            inputs: [utxo],
+            outputs: [],
+            changeAddress: utxo.resolved.address,
+            fee: BigInt(0), // Temporary fee
+        });
+
+        const minFee = emulator.calculateMinFee(tx);
+
+        tx = txBuilder.buildSync({
+            inputs: [utxo],
+            outputs: [],
+            changeAddress: utxo.resolved.address,
+            fee: minFee, // Use the calculated fee
+        });
+
+        await expect(emulator.submitTx(tx)).resolves.toBe(tx.hash.toString());
+    });
+
+    it("should accept a transaction with a fee greater than the minimum", async () => {
+        const utxo = emulator.getUtxos().values().next().value;
+        let tx = txBuilder.buildSync({
+            inputs: [utxo],
+            outputs: [],
+            changeAddress: utxo.resolved.address,
+            fee: BigInt(0), // Temporary fee
+        });
+
+        const minFee = emulator.calculateMinFee(tx) + BigInt(1000);// Fee greater than minimum
+
+        tx = txBuilder.buildSync({
+            inputs: [utxo],
+            outputs: [],
+            changeAddress: utxo.resolved.address,
+            fee: minFee, // Use the calculated fee
+        });
+
+        await expect(emulator.submitTx(tx)).resolves.toBe(tx.hash.toString());
     });
 
     it("should handle a transaction submitted as CBOR string", async () => {
