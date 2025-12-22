@@ -51,9 +51,13 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
     private time: number;
     private slot: number;
     private blockHeight: number;
+    private epoch: number;
     
     private readonly genesisInfos: NormalizedGenesisInfos;
     private readonly protocolParameters: ProtocolParameters;
+
+    private readonly activeSlotsCoefficient: number;
+    private readonly epochLength: number;
 
     // TO CHECK: Is that how to handle the block information?
     private lastBlock : EmulatorBlockInfos;
@@ -85,10 +89,15 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
         this.protocolParameters = protocolParameters;
         this.txBuilder = new TxBuilder( this.protocolParameters, this.genesisInfos );
 
+        // Try to extract from genesisInfos if available, otherwise use defaults
+        this.activeSlotsCoefficient = (genesisInfos as any).activeSlotsCoefficient || 0.05;
+        this.epochLength = (genesisInfos as any).epochLength || 432_000;
+        
         // Initialize the time and slot based on the genesis information
         this.time = this.genesisInfos.systemStartPosixMs;
         this.slot = this.genesisInfos.startSlotNo;
         this.blockHeight = 0;
+        this.epoch = 0;
         
         // Initialize the state maps
         this.utxos = new Map();
@@ -112,6 +121,30 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
         {
             this.addUtxoToLedger( new UTxO( iutxo ) );
         }
+    }
+
+    /**
+     * Get slots per block based on active slots coefficient
+     * Calculated as: 1 / activeSlotsCoefficient
+     * Mainnet: 1 / 0.05 = 20 slots per block on average
+     */
+    private getSlotsPerBlock(): number {
+        return Math.round(1 / this.activeSlotsCoefficient);
+    }
+
+    /**
+     * Get slots per epoch from genesis/extended info
+     * Mainnet: 432,000 slots = 5 days
+     */
+    private getSlotsPerEpoch(): number {
+        return this.epochLength;
+    }
+
+    /**
+     * Get the current epoch number
+     */
+    getCurrentEpoch(): number {
+        return this.epoch;
     }
 
     /** Add a UTxO to the ledger
@@ -290,9 +323,9 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
         // Basic ledger information
         output += `Block Height: ${this.blockHeight}\n`;
         output += `Current Slot: ${this.slot}\n`;
+        output += `Current Epoch: ${this.epoch}\n`;
         output += `Current Time: ${new Date(this.time).toISOString()}\n\n`;
 
-        // UTxOs
         const utxosCount = this.utxos.size;
         output += `=== UTxOs (${utxosCount}) ===\n`;
         
@@ -462,7 +495,10 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
     }
 
     fromSlotToPosix (slot: number): bigint {
-        return BigInt(slot) * BigInt(this.genesisInfos.slotLengthMs) + BigInt(this.genesisInfos.systemStartPosixMs);
+        // Calculate elapsed time from genesis
+        const slotsFromGenesis = slot - this.genesisInfos.startSlotNo;
+        const elapsedMs = slotsFromGenesis * this.genesisInfos.slotLengthMs;
+        return BigInt(this.genesisInfos.systemStartPosixMs + elapsedMs);
     }
     /**
      * Calculate the minimum required fee for a transaction
@@ -653,18 +689,28 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
     /**
      * Advance to a future block
      * @param blocks Number of blocks to advance
+     * 
+     * Note: In Cardano, the active slots coefficient (f = 0.05) means that on average 1 in 20 slots produces a block (1 / 0.05 = 20)
      */
     awaitBlock(blocks: number = 1): void {
         if (blocks <= 0) {
-            this.debug(0,"Invalid call to awaitBlock. Argument height must be greater than zero.");
+            this.debug(0,"Invalid call to awaitBlock. Argument blocks must be greater than zero.");
             return;
         }
 
-        this.blockHeight += blocks;
-        this.slot += blocks * (this.genesisInfos.slotLengthMs * 20 / 1000); // Not sure where to compute the 20 from
-        this.time += blocks * this.genesisInfos.slotLengthMs;
+        const slotsPerBlock = this.getSlotsPerBlock();
+        const slotsPerEpoch = this.getSlotsPerEpoch();
+        const slotsToAdvance = blocks * slotsPerBlock;
 
-        this.debug(1, `Advancing to block number ${this.blockHeight} (slot ${this.slot}). Time: ${new Date(this.time).toISOString()}`);
+        this.blockHeight += blocks;
+        this.slot += slotsToAdvance;
+        this.time += slotsToAdvance * this.genesisInfos.slotLengthMs;
+        
+        // Update epoch
+        const totalSlots = this.slot - this.genesisInfos.startSlotNo;
+        this.epoch = Math.floor(totalSlots / slotsPerEpoch);
+
+        this.debug(1, `Advanced ${blocks} block(s) to block ${this.blockHeight}, slot ${this.slot}, epoch ${this.epoch}. Time: ${new Date(this.time).toISOString()}`);
 
         // Number of blocks processed
         let blockProcessed = 0;
@@ -677,27 +723,34 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
 
         // Fast forward if the mempool is empty
         if (blockProcessed < blocks && this.mempool.length === 0) {
-            this.debug(2, `Fast forwarding remaning ${blocks - blockProcessed} blocks as mempool is empty`);
+            this.debug(2, `Fast forwarding remaining ${blocks - blockProcessed} blocks as mempool is empty`);
         }
     }
 
     /** Advance to a future slot
-     * @param slots Number of slots to advance
-     * @returns void
-     * */
+     * @param slots Number of slots to advance (1 slot = 1 second in Cardano)
+     */
     awaitSlot(slots: number = 1): void {
         if (slots <= 0) {
             this.debug(0,"Invalid call to awaitSlot. Argument slots must be greater than zero.");
             return;
         }
 
+        const currentHeight = this.blockHeight;
+        const slotsPerBlock = this.getSlotsPerBlock();
+        const slotsPerEpoch = this.getSlotsPerEpoch();
+
         this.slot += slots;
         this.time += slots * this.genesisInfos.slotLengthMs;
-        const currentHeight = this.blockHeight;
-        this.blockHeight = Math.floor(this.slot / (this.genesisInfos.slotLengthMs * 20 / 1000)); // Not sure where to compute the 20 from
+        
+        // Calculate block height and epoch from total slots
+        const totalSlots = this.slot - this.genesisInfos.startSlotNo;
+        this.blockHeight = Math.floor(totalSlots / slotsPerBlock);
+        this.epoch = Math.floor(totalSlots / slotsPerEpoch);
+
+        this.debug(1, `Advanced ${slots} slot(s) to slot ${this.slot}, block ${this.blockHeight}, epoch ${this.epoch}. Time: ${new Date(this.time).toISOString()}`);
 
         if (this.blockHeight > currentHeight) {
-            this.debug(1, `Advancing to block number ${this.blockHeight} (slot ${this.slot}). Time: ${new Date(this.time).toISOString()}`);
             let blocksToBeProcessed = this.blockHeight - currentHeight;
             this.debug(2, `Processing ${blocksToBeProcessed} blocks`);
             while (blocksToBeProcessed > 0 && this.mempool.length > 0) {
@@ -710,7 +763,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             }
         }
         else {
-            this.debug(2, `Slot ${this.slot} is in the same block as ${this.blockHeight}. No blocks to be processed`);
+            this.debug(2, `Slot ${this.slot} is in block ${this.blockHeight}. No blocks to be processed`);
         }
     }
 
