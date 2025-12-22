@@ -16,15 +16,7 @@ import {
     UTxO,
     Hash32,
     Value,
-    CredentialType
-} from "@harmoniclabs/plu-ts"
-
-import {
-    StakeAddressInfos
-} from "./types/StakeAddressInfos";
-import { EmulatorBlockInfos } from "./types/EmulatorBlockInfos";
-
-import {
+    CredentialType,
     CanResolveToUTxO,
     defaultMainnetGenesisInfos,
     CanBeData,
@@ -38,6 +30,11 @@ import {
     NormalizedGenesisInfos,
     TxBuilder
 } from "@harmoniclabs/buildooor"
+
+import {
+    StakeAddressInfos
+} from "./types/StakeAddressInfos";
+import { EmulatorBlockInfos } from "./types/EmulatorBlockInfos";
 
 import {Queue} from "./queue"
 import { createInitialUTxO, generateRandomTxHash } from "./utils/helper";
@@ -472,7 +469,7 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
      * @param tx The transaction
      * @returns The minimum required fee in lovelace
      */
-    private calculateMinFee(tx: Tx): bigint {
+    calculateMinFee(tx: Tx): bigint {
         // Get protocol parameters for fee calculation
         let a = this.protocolParameters.txFeePerByte;
         let b = this.protocolParameters.txFeeFixed;
@@ -951,7 +948,18 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             return false;
         }
 
-        // 5. Collateral presence check for phase 1
+        // 5. Check for sufficient fee
+        const minFee = this.calculateMinFee(tx);
+        if (tx.body.fee === BigInt(0)) {
+            this.debug(0, `Transaction fee cannot be zero.`);
+            return false;
+        }
+        else if (tx.body.fee < minFee) {
+            this.debug(0, `Insufficient fee: ${tx.body.fee} lovelaces provided, but ${minFee} required.`);
+            return false;
+        }
+
+        // 7. Collateral presence check for phase 1
         if (!this.validateCollateral(tx)) {
             this.debug(0, `Insufficient collateral. Atleast 5 ADA collateral is required for script inputs.`);
             return false;

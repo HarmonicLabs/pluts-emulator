@@ -1,10 +1,9 @@
 import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
 
-import { CanResolveToUTxO, TxBuilder, defaultMainnetGenesisInfos, normalizedGenesisInfos } from "@harmoniclabs/buildooor";
-import { defaultProtocolParameters, IUTxO, UTxO } from "@harmoniclabs/plu-ts";
+import { CanResolveToUTxO, TxBuilder, defaultMainnetGenesisInfos, normalizedGenesisInfos, defaultProtocolParameters, IUTxO, Tx, UTxO } from "@harmoniclabs/buildooor";
 
 import { Emulator } from "../src/Emulator";
-import { experimentFunctions } from "../src/experiments";
+import { experimentFunctions } from "../src/experiment";
 
 describe("Emulator Tests", () => {
     let emulator: Emulator;
