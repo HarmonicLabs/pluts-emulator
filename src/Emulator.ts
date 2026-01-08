@@ -1026,6 +1026,11 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
             this.debug(0, `Insufficient collateral. Atleast 5 ADA collateral is required for script inputs.`);
             return false;
         }
+
+        // Validity interval checks (TTL and validity start)
+        if (!this.validateValidityInterval(tx)) {
+            return false;
+        }
         
         this.debug(2, `Transaction ${txHash} is valid`);
         return true;
@@ -1152,6 +1157,85 @@ export class Emulator implements ITxRunnerProvider, IGetGenesisInfos, IGetProtoc
         }
         return Promise.resolve(); // Ensure the method returns a resolved promise
     }
+
+    /**
+     * Validate transaction validity interval
+     * Checks that the transaction is valid at the current slot
+     * 
+     * @param tx Transaction to validate
+     * @returns true if valid, false otherwise
+     */
+    private validateValidityInterval(tx: Tx): boolean {
+        const currentSlot = this.slot;
+        const txHash = tx.hash.toString();
+        
+        // Check validity start (validityIntervalStart)
+        if (tx.body.validityIntervalStart !== undefined && tx.body.validityIntervalStart !== null) {
+            const validityStart = Number(tx.body.validityIntervalStart);
+            
+            if (currentSlot < validityStart) {
+                this.debug(0, 
+                    `Transaction ${txHash} not yet valid. ` +
+                    `Current slot: ${currentSlot}, validity starts at slot: ${validityStart}, ` +
+                    `transaction is ${validityStart - currentSlot} slots too early.`
+                );
+                return false;
+            }
+            
+            this.debug(2, 
+                `Transaction ${txHash} validity start check passed. ` +
+                `Current slot: ${currentSlot} >= validity start: ${validityStart}`
+            );
+        }
+        
+        // Check TTL (time-to-live / validity end)
+        if (tx.body.ttl !== undefined && tx.body.ttl !== null) {
+            const ttl = Number(tx.body.ttl);
+            
+            if (currentSlot > ttl) {
+                this.debug(0, 
+                    `Transaction ${txHash} has expired. ` +
+                    `Current slot: ${currentSlot}, TTL (expires at slot): ${ttl}, ` +
+                    `transaction expired ${currentSlot - ttl} slots ago.`
+                );
+                return false;
+            }
+            
+            this.debug(2, 
+                `Transaction ${txHash} TTL check passed. ` +
+                `Current slot: ${currentSlot} <= TTL: ${ttl}, ` +
+                `${ttl - currentSlot} slots remaining until expiry`
+            );
+        }
+        
+        // Check that validity interval is well-formed (start < end)
+        if (tx.body.validityIntervalStart !== undefined && 
+            tx.body.validityIntervalStart !== null &&
+            tx.body.ttl !== undefined && 
+            tx.body.ttl !== null) {
+            
+            const validityStart = Number(tx.body.validityIntervalStart);
+            const ttl = Number(tx.body.ttl);
+            
+            if (validityStart >= ttl) {
+                this.debug(0, 
+                    `Transaction ${txHash} has invalid validity interval. ` +
+                    `Validity start (${validityStart}) must be less than TTL (${ttl}).`
+                );
+                return false;
+            }
+            
+            const validityWindow = ttl - validityStart;
+            this.debug(2, 
+                `Transaction ${txHash} has valid validity interval. ` +
+                `Window: ${validityWindow} slots (from ${validityStart} to ${ttl})`
+            );
+        }
+        
+        return true;
+    }
+
+
 }
 
 
